@@ -40,7 +40,7 @@ def extract_langsmith_data(project_name, model_name, dataset_name, api_key):
     
     output_jsonl = [
         {
-            "id": examples_dict[run.reference_example_id].metadata["id"],
+            "id": (examples_dict[run.reference_example_id].metadata or {}).get("id", str(run.reference_example_id)),
             "prompt": run.inputs["inputs"]["messages"][0]["content"],
             "article": run.outputs["final_report"],
         } for run in runs
