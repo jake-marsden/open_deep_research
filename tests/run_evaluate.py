@@ -62,12 +62,17 @@ async def target(
     return final_state
 
 async def main():
+    # Fetch the dataset and limit to first 3 examples
+    dataset = client.read_dataset(dataset_name=dataset_name)
+    examples = list(client.list_examples(dataset_id=dataset.id, limit=3))
+    
     return await client.aevaluate(
         target,
-        data=dataset_name,
+        data=examples,
+        # data=dataset_name,
         evaluators=evaluators,
-        experiment_prefix=f"ODR GPT-5, Tavily Search",
-        max_concurrency=10,
+        experiment_prefix=f"ODR GPT-5, Tavily Search (First 3)",
+        max_concurrency=3,
         metadata={
             "max_structured_output_retries": max_structured_output_retries,
             "allow_clarification": allow_clarification,
@@ -83,6 +88,7 @@ async def main():
             "compression_model_max_tokens": compression_model_max_tokens,
             "final_report_model": final_report_model,
             "final_report_model_max_tokens": final_report_model_max_tokens,
+            "num_examples": 3, # for logging
         }
     )
 
