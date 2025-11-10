@@ -5,9 +5,16 @@ load_dotenv(".env")
 from langsmith import Client
 from evaluators import eval_overall_quality, eval_relevance, eval_structure, eval_correctness, eval_groundedness, eval_completeness
 import asyncio
-from open_deep_research.deep_researcher import deep_researcher_builder
 from langgraph.checkpoint.memory import MemorySaver
 import uuid
+
+# System selection: Switch between 'open_deep_research' and 'rofc'
+SYSTEM_TO_EVALUATE = "open_deep_research"  # Options: "open_deep_research" or "rofc"
+
+if SYSTEM_TO_EVALUATE == "rofc":
+    from rofc.deep_researcher import deep_researcher_builder
+else:
+    from open_deep_research.deep_researcher import deep_researcher_builder
 
 client = Client()
 
@@ -71,9 +78,10 @@ async def main():
         data=examples,
         # data=dataset_name,
         evaluators=evaluators,
-        experiment_prefix=f"ODR GPT-5, Tavily Search (First 3)",
+        experiment_prefix=f"{SYSTEM_TO_EVALUATE.upper()}",
         max_concurrency=3,
         metadata={
+            "system": SYSTEM_TO_EVALUATE,
             "max_structured_output_retries": max_structured_output_retries,
             "allow_clarification": allow_clarification,
             "max_concurrent_research_units": max_concurrent_research_units,
