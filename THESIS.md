@@ -1,130 +1,444 @@
-# Reflective Orchestration for Factual Consistency in LangGraph Research Agents
-
-The langchain-ai/open_deep_research repository supports implementing **Reflective Orchestration for Factual Consistency (ROFC)** - a cyclic subgraph that detects and resolves factual conflicts during research. The current linear pipeline (Scope→Research→Write) can be enhanced with an internal consistency loop without breaking existing functionality.
-
-**ROFC Flow**: `plan_research` → `execute_retrieval` → `synthesize_claims` → `reflect_on_consistency` → `revise_claims` → **loop until consistent** → `final_report`
+# Reflective Orchestration for Factual Consistency (ROFC)
+## From Task-Execution Cycles to Quality-Assurance Cycles
 
 ---
 
-## Key Technical Findings
+## Problem Statement
 
-### 1. **Current Architecture Analysis**
-- **Linear Research Confirmed**: The existing research supervisor (`deep_researcher.py:178-349`) performs single-pass delegation without internal consistency checking
-- **Clean Insertion Point**: ROFC can replace the `research_supervisor` node at `deep_researcher.py:710` with zero breaking changes
-- **State Management**: The existing `override_reducer` system in `state.py:55-61` supports cyclic state updates required for ROFC
+The current `open_deep_research` architecture employs **local cycles for task execution** (iterative information gathering) but lacks **global cycles for quality assurance** (cross-stage verification and correction). Once `final_report_generation()` completes, the system terminates without verifying factual consistency, detecting contradictions, or enabling targeted refinement.
 
-### 2. **Implementation Requirements**
+This thesis introduces **Reflective Orchestration for Factual Consistency (ROFC)** to address this gap through a verification-correction loop. Additionally, we implement **Adaptive Model Selection (AMS)** as an integrated cost-optimization feature that mitigates the operational overhead introduced by ROFC's additional verification passes.
 
-#### New ROFC Nodes (3 core functions)
-```python
-# A) Extract structured claims with confidence scores
-async def synthesize_claims(state, config) -> Command["reflect_on_consistency"]
+## Architectural Analysis: Current State
 
-# B) Detect contradictions using rules + LLM analysis  
-async def reflect_on_consistency(state, config) -> Command["revise_claims" | "final_report"]
+### Main Pipeline (Globally Linear)
 
-# C) Resolve conflicts via targeted retrieval or model escalation
-async def revise_claims(state, config) -> Command["synthesize_claims" | "final_report"]
+```
+START → clarify_with_user() → write_research_brief() → research_supervisor → final_report_generation() → END
 ```
 
-#### State Schema Extensions
-```python
-class ROFCState(TypedDict):
-    claims: list[Claim] = []                    # Structured factual claims
-    evidence_map: dict[str, list[str]] = {}     # Evidence-to-source mapping  
-    conflicts: list[Conflict] = []              # Detected contradictions
-    rofc_iterations: int = 0                    # Loop counter
-    rofc_status: Optional[str] = None           # Terminal state indicator
+**Key observation:** Strictly unidirectional flow with no backward edges (`deep_researcher.py:714-716`)
+
+### Research Stage (Locally Cyclic)
+
+**Supervisor Loop:** `supervisor()` ↔ `supervisor_tools()`
+- **Purpose:** Delegate and coordinate parallel research tasks
+- **Exit conditions:** Iteration limit (`max_researcher_iterations`), no tool calls, or `ResearchComplete` signal
+- **Scope:** Task orchestration within Research stage only
+
+**Researcher Loop:** `researcher()` ↔ `researcher_tools()`  
+- **Purpose:** Iteratively gather information via search tools
+- **Exit conditions:** Iteration limit (`max_react_tool_calls`) or `ResearchComplete` signal
+- **Scope:** Information retrieval within individual research units
+
+### Critical Gaps
+
+1. **No post-generation verification:** `final_report_generation()` returns immediately without fact-checking
+2. **No backward routing:** Once Research stage completes, system cannot return for additional investigation
+3. **No quality assessment nodes:** No mechanisms for detecting inconsistencies, contradictions, or unsupported claims
+4. **State cleared prematurely:** `cleared_state = {"notes": {"type": "override", "value": []}}` at report generation start
+
+---
+
+## Proposed Architecture: ROFC
+
+### Design Principle
+
+Augment the linear scope→research→write pipeline with a **Verification-Correction Loop** that operates at the global architecture level, distinct from the existing local task-execution loops.
+
+### Extended Main Pipeline
+
+```
+START → clarify_with_user() → write_research_brief() → research_supervisor → 
+final_report_generation() → verify_factual_consistency() → route_based_on_quality()
+                                                               ↓              ↓
+                                                              END    ← refine_research()
+                                                                            ↓
+                                                                    research_supervisor
 ```
 
-### 3. **Conflict Detection Strategy**
-- **Rule-Based**: Fast detection of numerical contradictions, date conflicts, categorical oppositions
-- **LLM-Based**: Semantic conflict detection using structured output for nuanced contradictions
-- **Confidence Thresholding**: Only flag conflicts above configurable certainty levels (default: 0.3)
+### New Nodes
 
-### 4. **Resolution Mechanisms**
-- **Targeted Retrieval**: Re-query search APIs with conflict-specific terms
-- **Model Escalation**: Optional upgrade to higher-capability model (e.g., GPT-4.1 → Claude-Opus-4)
-- **Citation Transparency**: Preserve conflicting sources with methodological differences noted
+#### 1. `verify_factual_consistency(state: AgentState, config: RunnableConfig) -> Command`
 
----
+**Input:**
+- `state["final_report"]`: Generated report content
+- `state["notes"]`: Compressed research findings from supervisor
+- `state["raw_notes"]`: Uncompressed source material
 
-## Implementation Plan
+**Responsibilities:**
+- Extract structured claims from final report with confidence scores
+- Detect factual contradictions between claims
+- Identify unsupported assertions (claims without source evidence)
+- Calculate consistency metrics
 
-### **File Modifications** (~450 LOC total)
+**Output:**
+- `state["verification_report"]`: Structured assessment with detected issues
+- `state["consistency_score"]`: Quantitative quality metric
+- `state["flagged_claims"]`: List of problematic statements requiring attention
 
-#### New Files (~300 LOC)
-- `src/open_deep_research/rofc_nodes.py` - Core ROFC node implementations
-- `src/open_deep_research/rofc_telemetry.py` - Cost/latency instrumentation  
-- `tests/rofc_evaluation.py` - ROFC vs baseline evaluation harness
-- `tests/enterprise_conflicts.json` - 20-item conflict detection micro-eval
+**Implementation Strategy:**
+- **Rule-based detection:** Numerical contradictions, date conflicts, categorical oppositions
+- **LLM-based detection:** Semantic conflicts using structured output (similar to `ClarifyWithUser`, `ResearchQuestion` patterns)
+- **Evidence tracing:** Map each claim to supporting sources in raw_notes
 
-#### Modified Files (~150 LOC)  
-- `state.py` +30 LOC - Add ROFCState, Claim, Conflict models
-- `configuration.py` +40 LOC - Add ROFC feature flags and limits
-- `deep_researcher.py` +50 LOC - Replace supervisor with ROFC subgraph
-- `evaluators.py` +30 LOC - Add consistency-specific evaluation metrics
+#### 2. `route_based_on_quality(state: AgentState, config: RunnableConfig) -> Command[Literal["refine_research", "__end__"]]`
 
-### **Configuration Toggles**
+**Responsibilities:**
+- Evaluate verification results against quality thresholds
+- Decide whether to terminate the research process or continue refinement
+- Enforce iteration limits to prevent infinite loops
+- Append transparency disclaimers when quality thresholds not met within iteration budget
+
+**Decision Logic:**
 ```python
-# Feature flags for gradual rollout
-enable_rofc: bool = False                    # Master switch
-max_rofc_iterations: int = 3                 # Hard termination limit
-rofc_model_escalation: bool = False          # Premium model for conflicts
-rofc_confidence_threshold: float = 0.3       # Conflict detection sensitivity
+quality_threshold_met = state["consistency_score"] >= config.rofc_consistency_threshold
+max_iterations_exceeded = state["rofc_iterations"] >= config.max_rofc_iterations
+critical_errors_found = any(claim.severity == "critical" for claim in state["flagged_claims"])
+
+if quality_threshold_met and not critical_errors_found:
+    return Command(goto=END)
+elif max_iterations_exceeded:
+    return Command(goto=END, update={"final_report": append_verification_disclaimer(...)})
+else:
+    return Command(goto="refine_research")
 ```
 
-### **Evaluation Framework**
-- **Existing**: Leverage "Deep Research Bench" dataset and 6-dimensional quality scoring
-- **New**: Head-to-head ROFC vs baseline comparison on groundedness and factual accuracy
-- **Micro-eval**: 20 planted conflicts with pass/fail criteria (detect + resolve OR report discrepancy)
+**Exit Guarantees:**
+- Hard iteration limit prevents infinite loops
+- Terminates with verification disclaimer if quality threshold not met within limit
+
+#### 3. `refine_research(state: AgentState, config: RunnableConfig) -> Command[Literal["research_supervisor"]]`
+
+**Responsibilities:**
+- Convert `flagged_claims` into targeted research queries
+- Preserve existing research findings in state (do NOT clear `notes` or `raw_notes`)
+- Inject refinement context into supervisor prompt
+
+**Output:**
+```python
+return Command(
+    goto="research_supervisor",
+    update={
+        "supervisor_messages": {
+            "type": "override",
+            "value": [
+                SystemMessage(content=lead_researcher_prompt.format(...)),
+                HumanMessage(content=refinement_brief)
+            ]
+        },
+        "rofc_iterations": state["rofc_iterations"] + 1
+    }
+)
+```
+
+**Refinement Brief Structure:**
+```
+Previous research identified the following factual inconsistencies:
+1. [Claim A] conflicts with [Claim B] regarding [topic]
+   - Source for A: [citation]
+   - Source for B: [citation]
+   - Resolution needed: Verify which is correct or explain discrepancy
+
+2. [Claim C] lacks supporting evidence
+   - Required: Find authoritative sources confirming or refuting this claim
+
+Conduct focused research to resolve these specific issues.
+```
+
+### Cost Mitigation: Adaptive Model Selection
+
+ROFC's verification-correction loop introduces additional LLM calls, increasing operational costs. To mitigate this overhead, we implement **Adaptive Model Selection (AMS)**—a runtime optimization that dynamically selects the most cost-effective model for each task while maintaining quality standards.
+
+#### Design Principle
+
+Rather than using fixed models throughout the pipeline, AMS adapts model selection based on:
+- **Task complexity:** Simple tasks use cheaper models, complex tasks escalate to premium models
+- **Iteration context:** Initial attempts use cost-efficient models, refinement iterations escalate as needed
+- **Quality signals:** Verification failures trigger automatic model escalation
+
+#### Integration Strategy
+
+AMS operates transparently within existing node implementations:
+
+```python
+# Before each LLM call, select optimal model
+async def verify_factual_consistency(state: AgentState, config: RunnableConfig):
+    # Determine verification complexity
+    complexity_score = estimate_verification_complexity(
+        report_length=len(state["final_report"]),
+        research_units=len(state["notes"]),
+        iteration=state["rofc_iterations"]
+    )
+    
+    # Select model based on complexity and iteration
+    if state["rofc_iterations"] == 0 and complexity_score < 0.6:
+        verification_model = "openai:gpt-4.1-mini"  # Cost-efficient first pass
+    elif state["rofc_iterations"] >= 1:
+        verification_model = "anthropic:claude-opus-4"  # Escalate on refinement
+    else:
+        verification_model = "openai:gpt-4.1"  # Standard quality
+```
+
+#### Selection Criteria by Node
+
+1. **`verify_factual_consistency()`**: Escalate on refinement iterations
+2. **`refine_research()` → `research_supervisor`**: Use premium model for targeted re-research
+3. **`final_report_generation()`**: Maintain consistent model (quality-critical)
+
+#### Cost-Quality Trade-off
+
+```
+Iteration 0 (Initial): Fast model for verification → Detect issues
+                        ↓ (if issues found)
+Iteration 1 (Refine):   Premium model for verification + research → Resolve conflicts
+                        ↓ (if still issues)
+Iteration 2 (Final):    Premium model throughout → Maximum quality
+```
+
+**Expected savings:** 20-30% cost reduction compared to always using premium models, while maintaining comparable quality through strategic escalation.
 
 ---
 
-## Risk Analysis & Mitigations
+## State Schema Extensions
 
-| **Risk** | **Impact** | **Mitigation** |
-|----------|------------|----------------|
-| Infinite loops | Execution hangs | `max_rofc_iterations=3`, 5-minute timeouts |
-| State explosion | Memory issues | Max 50 claims/iteration, garbage collection |
-| Citation drift | Lost source URLs | Immutable evidence_map with UUID tracking |
-| Tool flakiness | Search failures | Exponential backoff, fallback to existing findings |
-| False positives | Unnecessary loops | Confidence thresholding, rule validation |
+### New State Fields
+
+```python
+class AgentState(MessagesState):
+    # Existing fields
+    supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
+    research_brief: Optional[str]
+    raw_notes: Annotated[list[str], override_reducer] = []
+    notes: Annotated[list[str], override_reducer] = []
+    final_report: str
+    
+    # ROFC additions
+    verification_report: Optional[VerificationReport] = None
+    consistency_score: float = 0.0
+    flagged_claims: Annotated[list[FlaggedClaim], operator.add] = []
+    rofc_iterations: int = 0
+    
+    # AMS tracking (optional telemetry)
+    model_selections: Annotated[list[ModelSelectionRecord], operator.add] = []
+    cumulative_cost: float = 0.0
+```
+
+### New Structured Outputs
+
+```python
+class FlaggedClaim(BaseModel):
+    """Represents a claim requiring attention."""
+    claim_text: str
+    issue_type: Literal["contradiction", "unsupported", "ambiguous"]
+    severity: Literal["critical", "moderate", "minor"]
+    conflicting_sources: list[str] = []
+    suggested_query: str  # For targeted refinement
+
+class VerificationReport(BaseModel):
+    """Structured output from verify_factual_consistency."""
+    overall_assessment: str
+    consistency_score: float
+    flagged_claims: list[FlaggedClaim]
+    verified_claims_count: int
+    total_claims_count: int
+
+class ModelSelectionRecord(BaseModel):
+    """Telemetry for adaptive model selection."""
+    node_name: str
+    selected_model: str
+    complexity_score: float
+    iteration: int
+    timestamp: float
+    estimated_cost: float
+```
 
 ---
 
-## Success Metrics
+## Configuration Extensions
 
-### **Quantitative Targets**
-- **Groundedness Improvement**: +15% fewer factual errors vs baseline
-- **Consistency Score**: >90% claim coherence in final reports  
-- **Latency Impact**: <50% increase in total research time
-- **Cost Impact**: <30% increase in token usage
-
-### **Qualitative Indicators**
-- Conflicting claims properly flagged and addressed
-- Source methodology differences transparently reported
-- Higher confidence in research conclusions
-- Maintained research depth and breadth
+```python
+class Configuration(BaseModel):
+    # Existing fields...
+    
+    # ROFC configuration
+    enable_rofc: bool = Field(
+        default=False,
+        metadata={"description": "Enable Reflective Orchestration for Factual Consistency"}
+    )
+    
+    max_rofc_iterations: int = Field(
+        default=2,
+        metadata={
+            "description": "Maximum verification-correction cycles",
+            "min": 1,
+            "max": 5
+        }
+    )
+    
+    rofc_consistency_threshold: float = Field(
+        default=0.85,
+        metadata={
+            "description": "Minimum consistency score to terminate loop",
+            "min": 0.0,
+            "max": 1.0
+        }
+    )
+    
+    verification_model: str = Field(
+        default="openai:gpt-4.1",
+        metadata={"description": "Model for factual consistency verification"}
+    )
+    
+    # Adaptive Model Selection (cost mitigation)
+    enable_adaptive_model_selection: bool = Field(
+        default=False,
+        metadata={"description": "Enable dynamic model selection based on task complexity and iteration"}
+    )
+    
+    model_pool: list[str] = Field(
+        default=["openai:gpt-4.1-mini", "openai:gpt-4.1", "anthropic:claude-opus-4"],
+        metadata={"description": "Available models for adaptive selection (ordered by cost)"}
+    )
+    
+    complexity_escalation_threshold: float = Field(
+        default=0.6,
+        metadata={
+            "description": "Complexity score above which to use premium models",
+            "min": 0.0,
+            "max": 1.0
+        }
+    )
+```
 
 ---
 
-## Next Steps
+## Integration Points
 
-### **Phase 1: Core Implementation** (Week 1-2)
-1. Implement basic ROFC nodes with rule-based conflict detection
-2. Add configuration flags and state schema extensions
-3. Create integration test proving loop execution and termination
-4. Deploy behind `enable_rofc=false` feature flag
+### Modified Graph Construction
 
-### **Phase 2: Advanced Features** (Week 3-4)  
-1. Add LLM-based semantic conflict detection
-2. Implement model escalation for complex conflicts
-3. Build targeted retrieval for conflict resolution
-4. Add comprehensive telemetry and cost tracking
+```python
+# Current (deep_researcher.py:699-719)
+deep_researcher_builder = StateGraph(AgentState, input=AgentInputState, config_schema=Configuration)
+deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)
+deep_researcher_builder.add_node("write_research_brief", write_research_brief)
+deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)
+deep_researcher_builder.add_node("final_report_generation", final_report_generation)
 
-### **Phase 3: Evaluation & Optimization** (Week 5-6)
-1. Run ROFC vs baseline evaluation on Deep Research Bench
-2. Execute enterprise conflict micro-evaluations  
-3. Optimize performance based on real-world usage patterns
-4. Document best practices and configuration recommendations
+deep_researcher_builder.add_edge(START, "clarify_with_user")
+deep_researcher_builder.add_edge("research_supervisor", "final_report_generation")
+deep_researcher_builder.add_edge("final_report_generation", END)  # MODIFIED
+
+# Proposed
+deep_researcher_builder.add_node("verify_factual_consistency", verify_factual_consistency)
+deep_researcher_builder.add_node("refine_research", refine_research)
+
+# Conditional edge based on enable_rofc config
+def should_verify(state: AgentState) -> bool:
+    config = Configuration.from_runnable_config(...)
+    return config.enable_rofc
+
+deep_researcher_builder.add_conditional_edges(
+    "final_report_generation",
+    lambda state: "verify_factual_consistency" if should_verify(state) else END
+)
+
+deep_researcher_builder.add_edge("verify_factual_consistency", "route_based_on_quality")
+# route_based_on_quality has internal conditional logic for END vs refine_research
+deep_researcher_builder.add_edge("refine_research", "research_supervisor")
+```
+
+### State Preservation Strategy
+
+**Critical modification to `final_report_generation()`:**
+
+```python
+# Current behavior (line 622)
+cleared_state = {"notes": {"type": "override", "value": []}}  # PROBLEM: Destroys evidence
+
+# ROFC-compatible behavior
+if config.enable_rofc:
+    cleared_state = {}  # Preserve notes and raw_notes for verification
+else:
+    cleared_state = {"notes": {"type": "override", "value": []}}  # Original behavior
+```
+
+---
+
+## Key Design Decisions
+
+### 1. Why Global Cycles vs. Enhanced Local Cycles?
+
+**Alternative rejected:** Add verification within `compress_research()` or `supervisor_tools()`
+
+**Rationale:**
+- Compression focuses on individual research unit synthesis, not cross-unit consistency
+- Supervisor operates on delegation logic, not final report quality
+- Global verification requires access to synthesized final report + all supporting evidence
+- Architectural clarity: Separation of concerns between execution (local) and quality assurance (global)
+
+### 2. Why Preserve Existing Loops Unchanged?
+
+- Existing loops are optimized for their specific purposes
+- Backward compatibility maintained
+- ROFC operates at higher abstraction level
+- Can be feature-flagged without affecting baseline behavior
+
+### 3. Why Route Through `research_supervisor` vs. Direct Researcher Access?
+
+- Maintains existing abstraction boundaries
+- Leverages supervisor's delegation and coordination logic
+- Avoids duplicating research orchestration code
+- Enables supervisor to strategically plan refinement (vs. rigid query execution)
+
+---
+
+## Expected Outcomes
+
+### Architectural Benefits
+
+1. **Formal quality assurance:** Explicit verification step with measurable metrics
+2. **Targeted refinement:** Only re-research specific gaps rather than full re-execution
+3. **Graceful degradation:** System terminates with transparency if quality threshold not met
+4. **Backward compatibility:** Existing linear behavior preserved when `enable_rofc=False`
+
+### Limitations & Trade-offs
+
+1. **Latency increase:** Additional verification pass + potential refinement cycles
+2. **Cost increase:** Extra LLM calls for verification and potential re-research (mitigated by Adaptive Model Selection)
+3. **Complexity increase:** More state management and conditional routing logic
+4. **No guarantee of perfection:** Quality threshold is heuristic, not ground truth
+
+---
+
+## Implementation Phases
+
+### Phase 1: Minimal Viable ROFC
+- Implement `verify_factual_consistency()` with rule-based detection only
+- Add `route_based_on_quality()` with hard iteration limits
+- Basic `refine_research()` that regenerates research brief from flagged claims
+- Feature flag integration
+- **Goal:** Prove cycle execution and termination guarantees
+
+### Phase 2: Enhanced Detection & Cost Optimization
+- Add LLM-based semantic conflict detection
+- Implement confidence scoring and threshold filtering
+- Evidence tracing from claims to raw_notes
+- **Implement Adaptive Model Selection (AMS)**:
+  - Complexity estimation heuristics
+  - Iteration-based escalation logic
+  - Cost tracking and telemetry
+- **Goal:** Improve detection precision/recall while controlling costs
+
+### Phase 3: Intelligent Refinement
+- Targeted query generation from flagged claims
+- Preserve vs. augment existing findings
+- Refine AMS escalation strategies based on Phase 2 telemetry
+- **Goal:** Minimize unnecessary re-research while optimizing cost-quality trade-offs
+
+### Phase 4: Production Readiness
+- Comprehensive telemetry and cost tracking
+- Performance optimization (caching, batching)
+- Edge case handling (timeout recovery, API failures)
+- Documentation and configuration best practices
+- **Goal:** Deployable system with operational reliability
