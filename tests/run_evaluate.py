@@ -78,7 +78,7 @@ async def main():
         data=examples,
         # data=dataset_name,
         evaluators=evaluators,
-        experiment_prefix=f"{SYSTEM_TO_EVALUATE.upper()}",
+        experiment_prefix=f"{SYSTEM_TO_EVALUATE.upper()}_{summarization_model}_{research_model}_{compression_model}_{final_report_model}",
         max_concurrency=3,
         metadata={
             "system": SYSTEM_TO_EVALUATE,
