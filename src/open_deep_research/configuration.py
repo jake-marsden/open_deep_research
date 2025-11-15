@@ -62,11 +62,11 @@ class Configuration(BaseModel):
         }
     )
     max_concurrent_research_units: int = Field(
-        default=5,
+        default=3,
         metadata={
             "x_oap_ui_config": {
                 "type": "slider",
-                "default": 5,
+                "default": 3,
                 "min": 1,
                 "max": 20,
                 "step": 1,
@@ -92,11 +92,11 @@ class Configuration(BaseModel):
         }
     )
     max_researcher_iterations: int = Field(
-        default=6,
+        default=3,
         metadata={
             "x_oap_ui_config": {
                 "type": "slider",
-                "default": 6,
+                "default": 3,
                 "min": 1,
                 "max": 10,
                 "step": 1,
@@ -105,11 +105,11 @@ class Configuration(BaseModel):
         }
     )
     max_react_tool_calls: int = Field(
-        default=10,
+        default=6,
         metadata={
             "x_oap_ui_config": {
                 "type": "slider",
-                "default": 10,
+                "default": 6,
                 "min": 1,
                 "max": 30,
                 "step": 1,
@@ -119,11 +119,11 @@ class Configuration(BaseModel):
     )
     # Model Configuration
     summarization_model: str = Field(
-        default="openai:gpt-4.1-mini",
+        default="openai:google/gemini-2.5-flash-lite",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1-mini",
+                "default": "openai:google/gemini-2.5-flash-lite",
                 "description": "Model for summarizing research results from Tavily search results"
             }
         }
@@ -151,11 +151,11 @@ class Configuration(BaseModel):
         }
     )
     research_model: str = Field(
-        default="openai:gpt-4.1",
+        default="openai:gpt-4o-mini",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
+                "default": "openai:gpt-4o-mini",
                 "description": "Model for conducting research. NOTE: Make sure your Researcher Model supports the selected search API."
             }
         }
@@ -171,11 +171,11 @@ class Configuration(BaseModel):
         }
     )
     compression_model: str = Field(
-        default="openai:gpt-4.1",
+        default="openai:google/gemini-2.0-flash-lite-001",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
+                "default": "openai:google/gemini-2.0-flash-lite-001",
                 "description": "Model for compressing research findings from sub-agents. NOTE: Make sure your Compression Model supports the selected search API."
             }
         }
@@ -191,11 +191,11 @@ class Configuration(BaseModel):
         }
     )
     final_report_model: str = Field(
-        default="openai:gpt-4.1",
+        default="openai:gpt-5-mini",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
+                "default": "openai:gpt-5-mini",
                 "description": "Model for writing the final report from all research findings"
             }
         }

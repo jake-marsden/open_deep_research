@@ -24,17 +24,17 @@ evaluators = [eval_overall_quality, eval_relevance, eval_structure, eval_correct
 # NOTE: Configure the right parameters for the experiment, these will be logged in the metadata
 max_structured_output_retries = 3
 allow_clarification = False
-max_concurrent_research_units = 10
-search_api = "tavily" # NOTE: We use Tavily to stay consistent
-max_researcher_iterations = 6
-max_react_tool_calls = 10
-summarization_model = "openai:gpt-4.1-mini"
+max_concurrent_research_units = 3 # changed from 10 to 3
+search_api = "tavily"
+max_researcher_iterations = 3     # changed from 6 to 3
+max_react_tool_calls = 6          # changed from 10 to 6
+summarization_model = "openai:google/gemini-2.5-flash-lite"      # $0.10/M input tokens | $0.40/M output tokens
 summarization_model_max_tokens = 8192
-research_model = "openai:gpt-5" # "anthropic:claude-sonnet-4-20250514"
+research_model = "openai:gpt-4o-mini"                            # $0.15/M input tokens | $0.60/M output tokens
 research_model_max_tokens = 10000
-compression_model = "openai:gpt-4.1"
+compression_model = "openai:google/gemini-2.0-flash-lite-001"    # $0.075/M input tokens | $0.30/M output tokens
 compression_model_max_tokens = 10000
-final_report_model = "openai:gpt-4.1"
+final_report_model = "openai:gpt-5-mini"                         # $0.25/M input tokens | $2/M output tokens
 final_report_model_max_tokens = 10000
 
 async def target(
@@ -69,17 +69,12 @@ async def target(
     return final_state
 
 async def main():
-    # Fetch the dataset and limit to first 3 examples
-    dataset = client.read_dataset(dataset_name=dataset_name)
-    examples = list(client.list_examples(dataset_id=dataset.id, limit=3))
-    
     return await client.aevaluate(
         target,
-        data=examples,
-        # data=dataset_name,
+        data=dataset_name,
         evaluators=evaluators,
         experiment_prefix=f"{SYSTEM_TO_EVALUATE.upper()}_{summarization_model}_{research_model}_{compression_model}_{final_report_model}",
-        max_concurrency=3,
+        max_concurrency=1, # Changed from 3 to 1 to avoid rate limits
         metadata={
             "system": SYSTEM_TO_EVALUATE,
             "max_structured_output_retries": max_structured_output_retries,
@@ -96,7 +91,6 @@ async def main():
             "compression_model_max_tokens": compression_model_max_tokens,
             "final_report_model": final_report_model,
             "final_report_model_max_tokens": final_report_model_max_tokens,
-            "num_examples": 3, # for logging
         }
     )
 
