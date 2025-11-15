@@ -68,15 +68,44 @@ async def target(
     )
     return final_state
 
+def is_english_content(text: str) -> bool:
+    """Detect if text is primarily English by checking for Chinese characters."""
+    if not text:
+        return False
+    chinese_chars = sum(1 for char in text if '\u4e00' <= char <= '\u9fff')
+    return chinese_chars / len(text) < 0.1
+
 async def main():
+    # Filter dataset to only include English examples
+    examples = list(client.list_examples(dataset_name=dataset_name))
+    
+    print(f"Total examples in dataset: {len(examples)}")
+    
+    english_examples = []
+    for ex in examples:
+        if ex.inputs and 'messages' in ex.inputs:
+            messages = ex.inputs['messages']
+            if messages and len(messages) > 0:
+                content = messages[0].get('content', '')
+                if is_english_content(content):
+                    english_examples.append(ex)
+    
+    print(f"English examples detected: {len(english_examples)}")
+    
+    if len(english_examples) == 0:
+        raise ValueError("No English examples found in dataset!")
+    
+    # Pass the actual examples instead of example_ids (which isn't supported)
     return await client.aevaluate(
         target,
-        data=dataset_name,
+        data=english_examples,  # Pass filtered examples directly
         evaluators=evaluators,
-        experiment_prefix=f"{SYSTEM_TO_EVALUATE.upper()}_{summarization_model}_{research_model}_{compression_model}_{final_report_model}",
+        experiment_prefix=f"{SYSTEM_TO_EVALUATE.upper()}_EN_ONLY_{summarization_model}_{research_model}_{compression_model}_{final_report_model}",
         max_concurrency=1, # Changed from 3 to 1 to avoid rate limits
         metadata={
             "system": SYSTEM_TO_EVALUATE,
+            "language_filter": "en_only",
+            "num_examples": len(english_examples),
             "max_structured_output_retries": max_structured_output_retries,
             "allow_clarification": allow_clarification,
             "max_concurrent_research_units": max_concurrent_research_units,
