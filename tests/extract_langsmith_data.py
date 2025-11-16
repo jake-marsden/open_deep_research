@@ -55,6 +55,7 @@ def extract_langsmith_data(project_name, model_name, dataset_name, api_key):
     
     print(f"Data written to {output_file_path}")
     print(f"Total records: {len(output_jsonl)}")
+    
     return output_file_path
 
 
