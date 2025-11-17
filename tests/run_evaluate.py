@@ -7,14 +7,7 @@ from evaluators import eval_overall_quality, eval_relevance, eval_structure, eva
 import asyncio
 from langgraph.checkpoint.memory import MemorySaver
 import uuid
-
-# System selection: Switch between 'open_deep_research' and 'rofc'
-SYSTEM_TO_EVALUATE = "open_deep_research"  # Options: "open_deep_research" or "rofc"
-
-if SYSTEM_TO_EVALUATE == "rofc":
-    from rofc.deep_researcher import deep_researcher_builder
-else:
-    from open_deep_research.deep_researcher import deep_researcher_builder
+from open_deep_research.deep_researcher import deep_researcher_builder
 
 client = Client()
 
@@ -100,10 +93,10 @@ async def main():
         target,
         data=english_examples,  # Pass filtered examples directly
         evaluators=evaluators,
-        experiment_prefix=f"{SYSTEM_TO_EVALUATE.upper()}_EN_ONLY_{summarization_model}_{research_model}_{compression_model}_{final_report_model}",
+        experiment_prefix=f"OPEN_DEEP_RESEARCH_EN_ONLY_{summarization_model}_{research_model}_{compression_model}_{final_report_model}",
         max_concurrency=1, # Changed from 3 to 1 to avoid rate limits
         metadata={
-            "system": SYSTEM_TO_EVALUATE,
+            "system": "open_deep_research",
             "language_filter": "en_only",
             "num_examples": len(english_examples),
             "max_structured_output_retries": max_structured_output_retries,
