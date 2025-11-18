@@ -1,9 +1,26 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
+import logging
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
+
+# Configure logging for research reviewer
+logger = logging.getLogger(__name__)
+
+# Configure logging to write to log.txt file (append mode, no console output)
+log_file_path = "/Users/faizwaris/deep_research/open_deep_research/src/open_deep_research/log.txt"
+file_handler = logging.FileHandler(log_file_path, mode='a')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
+# Add file handler to logger (no console handler)
+logger.addHandler(file_handler)
+logger.setLevel(logging.INFO)
+
+# Prevent propagation to avoid duplicate logs
+logger.propagate = False
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -25,6 +42,8 @@ from open_deep_research.prompts import (
     compress_research_system_prompt,
     final_report_generation_prompt,
     lead_researcher_prompt,
+    research_refinement_prompt,
+    research_reviewer_prompt,
     research_system_prompt,
     transform_messages_into_research_topic_prompt,
 )
@@ -33,6 +52,8 @@ from open_deep_research.state import (
     AgentState,
     ClarifyWithUser,
     ConductResearch,
+    QualityAssessment,
+    QualityAssessmentScores,
     ResearchComplete,
     ResearcherOutputState,
     ResearcherState,
@@ -222,6 +243,160 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
         }
     )
 
+async def research_reviewer(state: ResearcherState, config: RunnableConfig) -> Command[Literal["researcher", "__end__"]]:
+    """Research reviewer node that validates research output and decides next action.
+    
+    Evaluates research quality on 4 dimensions and makes one of two decisions:
+    - ACCEPT (score 8-10): High quality, pass findings to supervisor
+    - REFINE (score < 8): Needs improvement, send to research refiner with feedback
+    
+    Args:
+        state: Current researcher state with research output
+        config: Runtime configuration with model settings
+        
+    Returns:
+        Command to either end subgraph (accept) or loop back to researcher (refine)
+    """
+    # Step 1: Extract state and configuration
+    configurable = Configuration.from_runnable_config(config)
+    research_topic = state.get("research_topic", "")
+    compressed_research = state.get("compressed_research", "")
+    refinement_attempts = state.get("refinement_attempts", 0)
+    
+    # Step 2: Configure research reviewer model with dedicated model settings
+    # LLM returns scores and feedback only; decision calculated programmatically
+    research_reviewer_model = (
+        configurable_model
+        .with_structured_output(QualityAssessmentScores)
+        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
+        .with_config({
+            "model": configurable.research_reviewer_model,
+            "max_tokens": configurable.research_reviewer_model_max_tokens,
+            "api_key": get_api_key_for_model(configurable.research_reviewer_model, config),
+            "tags": ["langsmith:nostream", "research_reviewer"]
+        })
+    )
+    
+    # Step 3: Evaluate research quality with error handling
+    prompt_content = research_reviewer_prompt.format(
+        research_topic=research_topic,
+        research_output=compressed_research,
+        date=get_today_str()
+    )
+    
+    # Attempt quality assessment with retries
+    max_eval_attempts = 3
+    eval_attempt = 0
+    scores = None
+    
+    while eval_attempt < max_eval_attempts:
+        try:
+            scores = await research_reviewer_model.ainvoke([HumanMessage(content=prompt_content)])
+            break  # Success
+        except Exception as e:
+            eval_attempt += 1
+            if eval_attempt >= max_eval_attempts:
+                # Research reviewer failure - accept research with warning
+                return Command(
+                    goto=END,
+                    update={
+                        "compressed_research": f"[Research Review Error]\n\n{compressed_research}\n\n[Note: Research validation failed after {max_eval_attempts} attempts. Research accepted by default. Error: {str(e)[:200]}]",
+                        "refinement_attempts": refinement_attempts
+                    }
+                )
+            # Retry on next iteration
+            continue
+    
+    # Step 4: Determine which dimensions passed/failed
+    failed_dimensions = []
+    if not scores.relevance_pass:
+        failed_dimensions.append("Relevance")
+    if not scores.depth_pass:
+        failed_dimensions.append("Depth")
+    if not scores.evidence_pass:
+        failed_dimensions.append("Evidence")
+    if not scores.completeness_pass:
+        failed_dimensions.append("Completeness")
+    
+    # Calculate all_pass (must pass ALL dimensions)
+    all_pass = scores.relevance_pass and scores.depth_pass and scores.evidence_pass and scores.completeness_pass
+    
+    # Step 5: Apply deterministic decision rules (all must pass)
+    decision = "accept" if all_pass else "refine"
+    
+    # Log only when research fails
+    if decision == "refine":
+        logger.info(f"Research agent's findings failed due to the dimensions: {failed_dimensions}")
+    
+    # Step 6: Create complete assessment with calculated values
+    assessment = QualityAssessment(
+        relevance_pass=scores.relevance_pass,
+        depth_pass=scores.depth_pass,
+        evidence_pass=scores.evidence_pass,
+        completeness_pass=scores.completeness_pass,
+        all_pass=all_pass,
+        decision=decision,
+        failed_dimensions=failed_dimensions,
+        feedback=scores.feedback,
+        refinement_guidance=scores.refinement_guidance
+    )
+    
+    # Step 7: Execute binary decision
+    if decision == "accept":
+        # All dimensions passed - pass findings to supervisor
+        return Command(
+            goto=END,
+            update={
+                "quality_assessment": assessment,
+                "refinement_attempts": refinement_attempts
+            }
+        )
+    
+    else:  # decision == "refine"
+        # At least one dimension failed - check if we can refine
+        if refinement_attempts >= configurable.max_research_reviewer_refinements:
+            # Max refinement attempts reached - accept with disclaimer
+            disclaimer_message = (
+                f"[Research Reviewer: Max Refinements Reached]\n\n"
+                f"{compressed_research}\n\n"
+                f"[Note: Research reached maximum refinement attempts. Failed dimensions: {', '.join(failed_dimensions)}]"
+            )
+            return Command(
+                goto=END,
+                update={
+                    "compressed_research": disclaimer_message,
+                    "quality_assessment": assessment,
+                    "refinement_attempts": refinement_attempts
+                }
+            )
+        
+        # Loop back to researcher with comprehensive refinement context
+        # Provide: original topic, previous research, feedback, and guidance
+        refinement_message = (
+            f"<Previous Research Context>\n"
+            f"Research Topic: {research_topic}\n\n"
+            f"Previous Research Output (Failed Dimensions: {', '.join(failed_dimensions)}):\n"
+            f"{compressed_research}\n"
+            f"</Previous Research Context>\n\n"
+            f"<Research Reviewer Evaluation>\n"
+            f"Failed Dimensions: {', '.join(failed_dimensions)}\n\n"
+            f"Feedback: {assessment.feedback}\n\n"
+            f"Refinement Guidance: {assessment.refinement_guidance}\n"
+            f"</Research Reviewer Evaluation>\n\n"
+            f"Conduct targeted research to address the failed dimensions and strengthen the previous research output."
+        )
+        
+        # Start fresh with only the refinement context (Option 2 approach)
+        return Command(
+            goto="researcher",
+            update={
+                "researcher_messages": {"type": "override", "value": [HumanMessage(content=refinement_message)]},
+                "quality_assessment": assessment,
+                "refinement_attempts": refinement_attempts + 1,
+                "tool_call_iterations": 0  # Reset iteration counter for refinement attempt
+            }
+        )
+
 async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Command[Literal["supervisor", "__end__"]]:
     """Execute tools called by the supervisor, including research delegation and strategic thinking.
     
@@ -291,23 +466,40 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
             allowed_conduct_research_calls = conduct_research_calls[:configurable.max_concurrent_research_units]
             overflow_conduct_research_calls = conduct_research_calls[configurable.max_concurrent_research_units:]
             
-            # Execute research tasks in parallel
+            # Execute research tasks in parallel (research reviewer is now part of researcher subgraph)
             research_tasks = [
                 researcher_subgraph.ainvoke({
                     "researcher_messages": [
                         HumanMessage(content=tool_call["args"]["research_topic"])
                     ],
-                    "research_topic": tool_call["args"]["research_topic"]
-                }, config) 
+                    "research_topic": tool_call["args"]["research_topic"],
+                    "refinement_attempts": 0  # Initialize refinement counter
+                }, config)
                 for tool_call in allowed_conduct_research_calls
             ]
             
             tool_results = await asyncio.gather(*research_tasks)
             
-            # Create tool messages with research results
+            # Create tool messages with reviewed research results
             for observation, tool_call in zip(tool_results, allowed_conduct_research_calls):
+                # Extract review metadata from research output
+                quality_assessment = observation.get("quality_assessment")
+                refinement_attempts = observation.get("refinement_attempts", 0)
+                
+                content = observation.get("compressed_research", "Error synthesizing research report: Maximum retries exceeded")
+                
+                # Add research review information as metadata if quality assessment exists
+                if quality_assessment and refinement_attempts > 0:
+                    passed_count = sum([
+                        quality_assessment.relevance_pass,
+                        quality_assessment.depth_pass,
+                        quality_assessment.evidence_pass,
+                        quality_assessment.completeness_pass
+                    ])
+                    content = f"[Research Reviewer: {passed_count}/4 dimensions passed, Total Attempts: {refinement_attempts + 1}]\n\n{content}"
+                
                 all_tool_messages.append(ToolMessage(
-                    content=observation.get("compressed_research", "Error synthesizing research report: Maximum retries exceeded"),
+                    content=content,
                     name=tool_call["name"],
                     tool_call_id=tool_call["id"]
                 ))
@@ -379,6 +571,7 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
     # Step 1: Load configuration and validate tool availability
     configurable = Configuration.from_runnable_config(config)
     researcher_messages = state.get("researcher_messages", [])
+    refinement_attempts = state.get("refinement_attempts", 0)
     
     # Get all available research tools (search, MCP, think_tool)
     tools = await get_all_tools(config)
@@ -396,11 +589,19 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         "tags": ["langsmith:nostream"]
     }
     
-    # Prepare system prompt with MCP context if available
-    researcher_prompt = research_system_prompt.format(
-        mcp_prompt=configurable.mcp_prompt or "", 
-        date=get_today_str()
-    )
+    # Prepare system prompt with MCP context (use refinement prompt if in refinement mode)
+    if refinement_attempts > 0:
+        # Refinement mode: use specialized refinement prompt
+        researcher_prompt = research_refinement_prompt.format(
+            mcp_prompt=configurable.mcp_prompt or "", 
+            date=get_today_str()
+        )
+    else:
+        # Initial research: use standard research prompt
+        researcher_prompt = research_system_prompt.format(
+            mcp_prompt=configurable.mcp_prompt or "", 
+            date=get_today_str()
+        )
     
     # Configure model with tools, retry logic, and settings
     research_model = (
@@ -592,14 +793,18 @@ researcher_builder = StateGraph(
     config_schema=Configuration
 )
 
-# Add researcher nodes for research execution and compression
-researcher_builder.add_node("researcher", researcher)                 # Main researcher logic
-researcher_builder.add_node("researcher_tools", researcher_tools)     # Tool execution handler
-researcher_builder.add_node("compress_research", compress_research)   # Research compression
+# Add researcher nodes for research execution, compression, and review validation
+researcher_builder.add_node("researcher", researcher)                     # Main researcher logic
+researcher_builder.add_node("researcher_tools", researcher_tools)         # Tool execution handler
+researcher_builder.add_node("compress_research", compress_research)       # Research compression
+researcher_builder.add_node("research_reviewer", research_reviewer)       # Research review validation
 
 # Define researcher workflow edges
-researcher_builder.add_edge(START, "researcher")           # Entry point to researcher
-researcher_builder.add_edge("compress_research", END)      # Exit point after compression
+researcher_builder.add_edge(START, "researcher")                   # Entry point to researcher
+researcher_builder.add_edge("compress_research", "research_reviewer")  # Compression to review
+# research_reviewer has conditional edges defined by its Command returns:
+#   - If ACCEPT (score ≥ 8): goto=END (pass findings to supervisor)
+#   - If REFINE (score < 8): goto="researcher" (send to refiner with feedback)
 
 # Compile researcher subgraph for parallel execution by supervisor
 researcher_subgraph = researcher_builder.compile()

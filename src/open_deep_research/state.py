@@ -47,6 +47,41 @@ class ResearchQuestion(BaseModel):
         description="A research question that will be used to guide the research.",
     )
 
+class QualityAssessmentScores(BaseModel):
+    """Research review scoring output (binary pass/fail for each dimension)."""
+    
+    relevance_pass: bool = Field(
+        description="Does the research meet the relevance standard? (True/False)"
+    )
+    depth_pass: bool = Field(
+        description="Does the research meet the depth standard? (True/False)"
+    )
+    evidence_pass: bool = Field(
+        description="Does the research meet the evidence/citation standard? (True/False)"
+    )
+    completeness_pass: bool = Field(
+        description="Does the research meet the completeness standard? (True/False)"
+    )
+    feedback: str = Field(
+        description="Detailed feedback explaining which standards were met/failed and why"
+    )
+    refinement_guidance: str = Field(
+        description="Specific guidance for improvement on failed dimensions"
+    )
+
+class QualityAssessment(BaseModel):
+    """Complete research review evaluation with calculated decision."""
+    
+    relevance_pass: bool
+    depth_pass: bool
+    evidence_pass: bool
+    completeness_pass: bool
+    all_pass: bool = Field(description="True if all 4 dimensions passed")
+    decision: str = Field(description="Calculated decision: 'accept' or 'refine'")
+    failed_dimensions: list = Field(description="List of dimension names that failed")
+    feedback: str
+    refinement_guidance: str
+
 
 ###################
 # State Definitions
@@ -83,14 +118,18 @@ class SupervisorState(TypedDict):
 class ResearcherState(TypedDict):
     """State for individual researchers conducting research."""
     
-    researcher_messages: Annotated[list[MessageLikeRepresentation], operator.add]
+    researcher_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
     tool_call_iterations: int = 0
     research_topic: str
     compressed_research: str
     raw_notes: Annotated[list[str], override_reducer] = []
+    quality_assessment: Optional[QualityAssessment] = None
+    refinement_attempts: int = 0
 
 class ResearcherOutputState(BaseModel):
     """Output state from individual researchers."""
     
     compressed_research: str
     raw_notes: Annotated[list[str], override_reducer] = []
+    quality_assessment: Optional[QualityAssessment] = None
+    refinement_attempts: int = 0

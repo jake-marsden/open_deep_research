@@ -117,6 +117,19 @@ class Configuration(BaseModel):
             }
         }
     )
+    max_research_reviewer_refinements: int = Field(
+        default=2,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "slider",
+                "default": 2,
+                "min": 1,
+                "max": 5,
+                "step": 1,
+                "description": "Maximum number of refinement attempts per research unit when research reviewer identifies issues. Research review validation is always enforced."
+            }
+        }
+    )
     # Model Configuration
     summarization_model: str = Field(
         default="openai:google/gemini-2.5-flash-lite",
@@ -187,6 +200,26 @@ class Configuration(BaseModel):
                 "type": "number",
                 "default": 8192,
                 "description": "Maximum output tokens for compression model"
+            }
+        }
+    )
+    research_reviewer_model: str = Field(
+        default="openai:google/gemini-2.0-flash-001",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "openai:google/gemini-2.0-flash-001",
+                "description": "Model for research review evaluation of research outputs."
+            }
+        }
+    )
+    research_reviewer_model_max_tokens: int = Field(
+        default=4096,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 4096,
+                "description": "Maximum output tokens for research reviewer model"
             }
         }
     )

@@ -21,12 +21,15 @@ max_concurrent_research_units = 3 # changed from 10 to 3
 search_api = "tavily"
 max_researcher_iterations = 3     # changed from 6 to 3
 max_react_tool_calls = 6          # changed from 10 to 6
+max_research_reviewer_refinements = 2  # Maximum refinement loops per research unit
 summarization_model = "openai:google/gemini-2.5-flash-lite"      # $0.10/M input tokens | $0.40/M output tokens
 summarization_model_max_tokens = 8192
 research_model = "openai:gpt-4o-mini"                            # $0.15/M input tokens | $0.60/M output tokens
 research_model_max_tokens = 10000
 compression_model = "openai:google/gemini-2.0-flash-lite-001"    # $0.075/M input tokens | $0.30/M output tokens
 compression_model_max_tokens = 10000
+research_reviewer_model = "openai:google/gemini-2.0-flash-001"   # $0.075/M input tokens | $0.30/M output tokens
+research_reviewer_model_max_tokens = 10000
 final_report_model = "openai:gpt-5-mini"                         # $0.25/M input tokens | $2/M output tokens
 final_report_model_max_tokens = 10000
 
@@ -46,12 +49,15 @@ async def target(
     config["configurable"]["search_api"] = search_api
     config["configurable"]["max_researcher_iterations"] = max_researcher_iterations
     config["configurable"]["max_react_tool_calls"] = max_react_tool_calls
+    config["configurable"]["max_research_reviewer_refinements"] = max_research_reviewer_refinements
     config["configurable"]["summarization_model"] = summarization_model
     config["configurable"]["summarization_model_max_tokens"] = summarization_model_max_tokens
     config["configurable"]["research_model"] = research_model
     config["configurable"]["research_model_max_tokens"] = research_model_max_tokens
     config["configurable"]["compression_model"] = compression_model
     config["configurable"]["compression_model_max_tokens"] = compression_model_max_tokens
+    config["configurable"]["research_reviewer_model"] = research_reviewer_model
+    config["configurable"]["research_reviewer_model_max_tokens"] = research_reviewer_model_max_tokens
     config["configurable"]["final_report_model"] = final_report_model
     config["configurable"]["final_report_model_max_tokens"] = final_report_model_max_tokens
     # NOTE: We do not use MCP tools to stay consistent
@@ -105,12 +111,15 @@ async def main():
             "search_api": search_api,
             "max_researcher_iterations": max_researcher_iterations,
             "max_react_tool_calls": max_react_tool_calls,
+            "max_research_reviewer_refinements": max_research_reviewer_refinements,
             "summarization_model": summarization_model,
             "summarization_model_max_tokens": summarization_model_max_tokens,
             "research_model": research_model,
             "research_model_max_tokens": research_model_max_tokens,
             "compression_model": compression_model,
             "compression_model_max_tokens": compression_model_max_tokens,
+            "research_reviewer_model": research_reviewer_model,
+            "research_reviewer_model_max_tokens": research_reviewer_model_max_tokens,
             "final_report_model": final_report_model,
             "final_report_model_max_tokens": final_report_model_max_tokens,
         }
