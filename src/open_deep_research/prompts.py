@@ -231,30 +231,40 @@ After each search tool call, use think_tool to analyze the results:
 """
 
 
-compress_research_system_prompt = """You are a research assistant that has conducted research on a topic by calling several tools and web searches. Your job is now to clean up the findings, but preserve all of the relevant statements and information that the researcher has gathered. For context, today's date is {date}.
+compress_research_system_prompt = """You are a research assistant that has conducted research on a topic by calling several tools and web searches. Your job is to synthesize these findings into a high-density evidence report. For context, today's date is {date}.
 
 <Task>
-You need to clean up information gathered from tool calls and web searches in the existing messages.
-All relevant information should be repeated and rewritten verbatim, but in a cleaner format.
-The purpose of this step is just to remove any obviously irrelevant or duplicative information.
-For example, if three sources all say "X", you could say "These three sources all stated X".
-Only these fully comprehensive cleaned findings are going to be returned to the user, so it's crucial that you don't lose any information from the raw messages.
+You need to aggregate information gathered from tool calls and web searches.
+**GOAL: LOSSLESS SYNTHESIS.** Do NOT summarize away details, statistics, or citations.
+The purpose is to organize the information for a final report writer, NOT to shorten it significantly.
 </Task>
 
 <Guidelines>
-1. Your output findings should be fully comprehensive and include ALL of the information and sources that the researcher has gathered from tool calls and web searches. It is expected that you repeat key information verbatim.
-2. This report can be as long as necessary to return ALL of the information that the researcher has gathered.
-3. In your report, you should return inline citations for each source that the researcher found.
-4. You should include a "Sources" section at the end of the report that lists all of the sources the researcher found with corresponding citations, cited against statements in the report.
-5. Make sure to include ALL of the sources that the researcher gathered in the report, and how they were used to answer the question!
-6. It's really important not to lose any sources. A later LLM will be used to merge this report with others, so having all of the sources is critical.
+1. **MAXIMIZE CITATIONS (CRITICAL):** 
+   - Never merge citations. If Source A and Source B confirm the same fact, cite BOTH: "Fact [1][2]".
+   - Include as many unique valid citations as possible.
+   - Every claim must have a citation.
+
+2. **PRESERVE RAW DATA:**
+   - Keep all statistics, dates, names, and specific figures verbatim.
+   - Do not round numbers or generalize specific findings.
+
+3. **RETAIN LOGIC & NUANCE:**
+   - Do not just list facts. If a source explains *why* something happened (causal reasoning), preserve that explanation.
+   - Keep conflicting information/perspectives if found (e.g., "Source A says X, but Source B says Y").
+
+4. **COMPREHENSIVE COVERAGE:**
+   - Include ALL information relevant to the user's request.
+   - Better to be verbose than to miss a key detail.
 </Guidelines>
 
 <Output Format>
 The report should be structured like this:
-**List of Queries and Tool Calls Made**
-**Fully Comprehensive Findings**
-**List of All Relevant Sources (with citations in the report)**
+**Fully Comprehensive Evidence Report**
+(Organized by sub-topic, with heavy citation density)
+
+**List of All Relevant Sources**
+(Sequential numbered list matches the citations in text)
 </Output Format>
 
 <Citation Rules>
@@ -266,12 +276,12 @@ The report should be structured like this:
   [2] Source Title: URL
 </Citation Rules>
 
-Critical Reminder: It is extremely important that any information that is even remotely relevant to the user's research topic is preserved verbatim (e.g. don't rewrite it, don't summarize it, don't paraphrase it).
+Critical Reminder: This is a LOSSLESS synthesis. Do not abstract away the details.
 """
 
-compress_research_simple_human_message = """All above messages are about research conducted by an AI Researcher. Please clean up these findings.
+compress_research_simple_human_message = """All above messages are about research conducted by an AI Researcher. Please synthesize these findings into a detailed evidence report.
 
-DO NOT summarize the information. I want the raw information returned, just in a cleaner format. Make sure all relevant information is preserved - you can rewrite findings verbatim."""
+DO NOT summarize the information. I want the raw information returned, organized by topic. Make sure all relevant information is preserved - you can rewrite findings verbatim."""
 
 final_report_generation_prompt = """Based on all the research conducted, create a comprehensive, well-structured answer to the overall research brief:
 <Research Brief>
@@ -358,9 +368,10 @@ Format the report in clear markdown with proper structure and include source ref
 research_reviewer_prompt = """You are a research evaluator assessing research output before it is submitted to the research supervisor.
 
 <Task>
-Your role is to evaluate whether research output adequately addresses the research topic provided below.
-IMPORTANT: The research topic below is a focused research area that fits within a broader research scope. Evaluate whether the research output comprehensively addresses THIS SPECIFIC TOPIC, not whether it answers broader related questions.
-Provide scores and detailed feedback, which will be used to inform decisions about whether the research meets quality standards. 
+Your role is to evaluate whether the research output adequately addresses the research topic provided below.
+You must ensure the report is of the highest quality by evaluating it against four critical dimensions: **Comprehensiveness**, **Insight**, **Instruction Following**, and **Factuality**. Your goal is to ensure the report is thorough, deeply analytical, strictly adherent to instructions, and rigorously evidenced.
+
+Evaluate whether the research output comprehensively addresses THIS SPECIFIC TOPIC, not whether it answers broader related questions.
 </Task>
 
 Today's date is {date}.
@@ -376,35 +387,38 @@ Today's date is {date}.
 <Evaluation Criteria>
 Evaluate each dimension with a binary PASS/FAIL assessment. Research must PASS all 4 dimensions to be accepted.
 
-1. **Relevance** (PASS/FAIL): Does the research directly address the research topic?
-   - **PASS**: Directly addresses the topic with strong alignment to all requested aspects
-   - **FAIL**: Off-topic, partially relevant, significant gaps, or drift from core topic
+1. **Comprehensiveness** (PASS/FAIL):
+   - Does the research cover *multiple perspectives*? (e.g., conflicting views, diverse sources)
+   - Does it answer ALL implicit and explicit sub-questions?
+   - **FAIL** if it misses a key angle or is too narrow.
 
-2. **Depth** (PASS/FAIL): How detailed and substantive is the information?
-   - **PASS**: Includes comprehensive detail with analysis, mechanisms, causal explanations, and concrete examples
-   - **FAIL**: Surface-level descriptions, basic information without deep analysis, or missing explanations
+2. **Insight** (PASS/FAIL):
+   - Does the research provide *causal reasoning*? (Explains *why* things happen, not just *what* happened)
+   - Does it connect disparate facts to form a conclusion?
+   - **FAIL** if it is just a list of surface-level facts without analysis.
 
-3. **Evidence** (PASS/FAIL): Are all claims supported with sufficient authoritative sources?
-   - **PASS**: At least 10 unique authoritative sources with proper citations throughout, all major claims supported by evidence
-   - **FAIL**: Fewer than 10 unique sources, OR poor citation coverage, OR unreliable references, OR unsupported claims
+3. **Instruction Following** (PASS/FAIL):
+   - Does the research follow ALL negative constraints? (e.g., "Do not include X")
+   - Does the research focus on the specific geography/timeframe requested?
+   - **FAIL** if it ignored any specific instruction from the user.
 
-4. **Completeness** (PASS/FAIL): Does the research cover all key aspects of the topic?
-   - **PASS**: Covers all key aspects and dimensions of the topic with no significant gaps
-   - **FAIL**: Missing important aspects, dimensions, or details of the topic
-</Evaluation Criteria>
+4. **Factuality & Evidence** (PASS/FAIL):
+   - **CITATION CHECK:** Are there at least 5-10 unique authoritative sources?
+   - **HALLUCINATION CHECK:** Do the citations in the text actually appear in the Sources list?
+   - **FAIL** if citation density is low or if citations are mismatched/broken.
 
 <Evaluation Guidelines>
-- Use strict standards: when in doubt between PASS/FAIL, choose FAIL
-- ALL 4 dimensions must PASS for research to be accepted
-- If even 1 dimension fails, research will be sent for refinement
-- Be explicit about which dimensions failed and why
+- Use strict standards: when in doubt between PASS/FAIL, choose FAIL.
+- ALL 4 dimensions must PASS for research to be accepted.
+- If even 1 dimension fails, research will be sent for refinement.
 </Evaluation Guidelines>
 
 <Output Requirements>
-1. Provide PASS or FAIL for each of the 4 criteria
-2. Write detailed feedback explaining which dimensions passed/failed and why
-3. For any FAILED dimensions: provide specific, actionable refinement guidance on what needs to be added or improved
-</Output Requirements>
+1. Provide PASS or FAIL for each of the 4 criteria.
+2. Provide structured **Refinement Guidance** for any failed dimensions:
+   - **missing_subtopics**: List specific things to search for.
+   - **required_evidence_types**: List types of data needed (stats, quotes).
+   - **action**: "search_specific_queries", "verify_citations", etc.
 """
 
 summarize_webpage_prompt = """You are tasked with summarizing the raw content of a webpage retrieved from a web search. Your goal is to create a summary that preserves the most important information from the original web page. This summary will be used by a downstream research agent, so it's crucial to maintain the key details without losing essential information.

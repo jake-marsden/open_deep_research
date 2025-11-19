@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
@@ -246,9 +247,9 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
 async def research_reviewer(state: ResearcherState, config: RunnableConfig) -> Command[Literal["researcher", "__end__"]]:
     """Research reviewer node that validates research output and decides next action.
     
-    Evaluates research quality on 4 dimensions and makes one of two decisions:
-    - ACCEPT (score 8-10): High quality, pass findings to supervisor
-    - REFINE (score < 8): Needs improvement, send to research refiner with feedback
+    Evaluates research quality on RACE dimensions and Factuality.
+    - ACCEPT (all pass): Pass findings to supervisor
+    - REFINE (any fail): Send to research refiner with structured directives
     
     Args:
         state: Current researcher state with research output
@@ -262,6 +263,11 @@ async def research_reviewer(state: ResearcherState, config: RunnableConfig) -> C
     research_topic = state.get("research_topic", "")
     compressed_research = state.get("compressed_research", "")
     refinement_attempts = state.get("refinement_attempts", 0)
+
+    # Log inputs
+    # logger.info(f"RESEARCH REVIEWER: Received Topic: {research_topic[:100]}...")
+    # logger.info(f"RESEARCH REVIEWER: Compressed Research Length: {len(compressed_research)}")
+    # logger.info(f"RESEARCH REVIEWER: Compressed Research Snippet: {compressed_research[:500]}...")
     
     # Step 2: Configure research reviewer model with dedicated model settings
     # LLM returns scores and feedback only; decision calculated programmatically
@@ -292,6 +298,9 @@ async def research_reviewer(state: ResearcherState, config: RunnableConfig) -> C
     while eval_attempt < max_eval_attempts:
         try:
             scores = await research_reviewer_model.ainvoke([HumanMessage(content=prompt_content)])
+            # Log model decision
+            # logger.info(f"RESEARCH REVIEWER: Model Evaluation Result:\nComprehensiveness: {scores.comprehensiveness_pass}\nInsight: {scores.insight_pass}\nInstruction Following: {scores.instruction_following_pass}\nFactuality: {scores.factuality_pass}")
+            # logger.info(f"RESEARCH REVIEWER: Model Feedback: {scores.feedback}")
             break  # Success
         except Exception as e:
             eval_attempt += 1
@@ -307,33 +316,52 @@ async def research_reviewer(state: ResearcherState, config: RunnableConfig) -> C
             # Retry on next iteration
             continue
     
-    # Step 4: Determine which dimensions passed/failed
+    # Step 4: Deterministic Factuality Check (Hallucination Check)
+    # Verify that citations in text [X] actually exist in the Sources list
+    # Supports multiple formats: [1], (1), [Source 1], 1. Title
+    citations_in_text = set(re.findall(r'\[(\d+)\]', compressed_research))
+    if not citations_in_text:
+        # Try alternative format (1)
+        citations_in_text = set(re.findall(r'\((\d+)\)', compressed_research))
+    
+    # logger.info(f"RESEARCH REVIEWER: Deterministic Citation Check found {len(citations_in_text)} unique citations in text.")
+    
+    # Force fail Factuality if no citations found in text but text length is substantial
+    if len(citations_in_text) == 0 and len(compressed_research) > 500:
+        scores.factuality_pass = False
+        scores.feedback += " [System Note: Failed deterministic citation check. No inline citations found in text body (e.g., [1]).]"
+    
+    # Step 5: Determine which dimensions passed/failed
     failed_dimensions = []
-    if not scores.relevance_pass:
-        failed_dimensions.append("Relevance")
-    if not scores.depth_pass:
-        failed_dimensions.append("Depth")
-    if not scores.evidence_pass:
-        failed_dimensions.append("Evidence")
-    if not scores.completeness_pass:
-        failed_dimensions.append("Completeness")
+    if not scores.comprehensiveness_pass:
+        failed_dimensions.append("Comprehensiveness")
+    if not scores.insight_pass:
+        failed_dimensions.append("Insight")
+    if not scores.factuality_pass:
+        failed_dimensions.append("Factuality")
+    if not scores.instruction_following_pass:
+        failed_dimensions.append("Instruction Following")
     
+    # logger.info(f"RESEARCH REVIEWER: Calculated Failed Dimensions: {failed_dimensions}")
+
     # Calculate all_pass (must pass ALL dimensions)
-    all_pass = scores.relevance_pass and scores.depth_pass and scores.evidence_pass and scores.completeness_pass
+    all_pass = len(failed_dimensions) == 0
     
-    # Step 5: Apply deterministic decision rules (all must pass)
+    # Step 6: Apply deterministic decision rules (all must pass)
     decision = "accept" if all_pass else "refine"
     
+    # logger.info(f"RESEARCH REVIEWER: Final Decision: {decision}")
+
     # Log only when research fails
     if decision == "refine":
         logger.info(f"Research agent's findings failed due to the dimensions: {failed_dimensions}")
     
-    # Step 6: Create complete assessment with calculated values
+    # Step 7: Create complete assessment with calculated values
     assessment = QualityAssessment(
-        relevance_pass=scores.relevance_pass,
-        depth_pass=scores.depth_pass,
-        evidence_pass=scores.evidence_pass,
-        completeness_pass=scores.completeness_pass,
+        comprehensiveness_pass=scores.comprehensiveness_pass,
+        insight_pass=scores.insight_pass,
+        factuality_pass=scores.factuality_pass,
+        instruction_following_pass=scores.instruction_following_pass,
         all_pass=all_pass,
         decision=decision,
         failed_dimensions=failed_dimensions,
@@ -341,7 +369,7 @@ async def research_reviewer(state: ResearcherState, config: RunnableConfig) -> C
         refinement_guidance=scores.refinement_guidance
     )
     
-    # Step 7: Execute binary decision
+    # Step 8: Execute binary decision
     if decision == "accept":
         # All dimensions passed - pass findings to supervisor
         return Command(
@@ -381,11 +409,16 @@ async def research_reviewer(state: ResearcherState, config: RunnableConfig) -> C
             f"<Research Reviewer Evaluation>\n"
             f"Failed Dimensions: {', '.join(failed_dimensions)}\n\n"
             f"Feedback: {assessment.feedback}\n\n"
-            f"Refinement Guidance: {assessment.refinement_guidance}\n"
+            f"Refinement Guidance:\n"
+            f"- Missing Subtopics: {', '.join(assessment.refinement_guidance.missing_subtopics)}\n"
+            f"- Required Evidence: {', '.join(assessment.refinement_guidance.required_evidence_types)}\n"
+            f"- Action: {assessment.refinement_guidance.action}\n"
             f"</Research Reviewer Evaluation>\n\n"
             f"Conduct targeted research to address the failed dimensions and strengthen the previous research output."
         )
         
+        # logger.info(f"RESEARCH REVIEWER: Refinement Message Sent to Researcher:\n{refinement_message}")
+
         # Start fresh with only the refinement context (Option 2 approach)
         return Command(
             goto="researcher",
@@ -491,10 +524,10 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                 # Add research review information as metadata if quality assessment exists
                 if quality_assessment and refinement_attempts > 0:
                     passed_count = sum([
-                        quality_assessment.relevance_pass,
-                        quality_assessment.depth_pass,
-                        quality_assessment.evidence_pass,
-                        quality_assessment.completeness_pass
+                        quality_assessment.comprehensiveness_pass,
+                        quality_assessment.insight_pass,
+                        quality_assessment.factuality_pass,
+                        quality_assessment.instruction_following_pass
                     ])
                     content = f"[Research Reviewer: {passed_count}/4 dimensions passed, Total Attempts: {refinement_attempts + 1}]\n\n{content}"
                 

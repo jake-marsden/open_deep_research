@@ -47,40 +47,55 @@ class ResearchQuestion(BaseModel):
         description="A research question that will be used to guide the research.",
     )
 
-class QualityAssessmentScores(BaseModel):
-    """Research review scoring output (binary pass/fail for each dimension)."""
+class RefinementDirectives(BaseModel):
+    """Structured directives for research refinement."""
     
-    relevance_pass: bool = Field(
-        description="Does the research meet the relevance standard? (True/False)"
+    missing_subtopics: list[str] = Field(
+        description="Specific subtopics or information categories that are missing.",
+        default_factory=list
     )
-    depth_pass: bool = Field(
-        description="Does the research meet the depth standard? (True/False)"
+    required_evidence_types: list[str] = Field(
+        description="Types of evidence needed (e.g., 'Statistical data', 'Expert quote', 'Contra-arguments').",
+        default_factory=list
     )
-    evidence_pass: bool = Field(
-        description="Does the research meet the evidence/citation standard? (True/False)"
+    action: str = Field(
+        description="Recommended action: 'search_specific_queries', 'verify_citations', 'expand_breadth'."
     )
-    completeness_pass: bool = Field(
-        description="Does the research meet the completeness standard? (True/False)"
+
+class QualityAssessmentScores(BaseModel):
+    """Research review scoring output based on RACE and FACT metrics."""
+    
+    comprehensiveness_pass: bool = Field(
+        description="Does the research cover multiple perspectives and all key sub-questions? (True/False)"
+    )
+    insight_pass: bool = Field(
+        description="Does the research provide causal reasoning and connections, not just facts? (True/False)"
+    )
+    instruction_following_pass: bool = Field(
+        description="Does the research strictly adhere to all constraints and objectives? (True/False)"
+    )
+    factuality_pass: bool = Field(
+        description="Are there sufficient valid, authoritative citations? (True/False)"
     )
     feedback: str = Field(
         description="Detailed feedback explaining which standards were met/failed and why"
     )
-    refinement_guidance: str = Field(
-        description="Specific guidance for improvement on failed dimensions"
+    refinement_guidance: RefinementDirectives = Field(
+        description="Structured guidance for improvement on failed dimensions"
     )
 
 class QualityAssessment(BaseModel):
     """Complete research review evaluation with calculated decision."""
     
-    relevance_pass: bool
-    depth_pass: bool
-    evidence_pass: bool
-    completeness_pass: bool
+    comprehensiveness_pass: bool
+    insight_pass: bool
+    instruction_following_pass: bool
+    factuality_pass: bool
     all_pass: bool = Field(description="True if all 4 dimensions passed")
     decision: str = Field(description="Calculated decision: 'accept' or 'refine'")
     failed_dimensions: list = Field(description="List of dimension names that failed")
     feedback: str
-    refinement_guidance: str
+    refinement_guidance: RefinementDirectives
 
 
 ###################
