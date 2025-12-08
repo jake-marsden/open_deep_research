@@ -1,6 +1,7 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
+import logging
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
@@ -19,6 +20,10 @@ from langgraph.types import Command
 from open_deep_research.configuration import (
     Configuration,
 )
+from open_deep_research.model_selector import (
+    ModelSelector,
+    TierDecision,
+)
 from open_deep_research.prompts import (
     clarify_with_user_instructions,
     compress_research_simple_human_message,
@@ -32,7 +37,10 @@ from open_deep_research.state import (
     AgentInputState,
     AgentState,
     ClarifyWithUser,
+    ComplexityAssessment,
     ConductResearch,
+    ContextEstimation,
+    FeatureExtraction,
     ResearchComplete,
     ResearcherOutputState,
     ResearcherState,
@@ -51,6 +59,8 @@ from open_deep_research.utils import (
     remove_up_to_last_ai_message,
     think_tool,
 )
+
+logger = logging.getLogger(__name__)
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
@@ -222,6 +232,111 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
         }
     )
 
+def _resolve_tier_for_task(
+    tool_call: dict,
+    model_selector: ModelSelector,
+    configurable: Configuration
+) -> TierDecision:
+    """Resolve the model tier for a ConductResearch task.
+    
+    Extracts the complexity assessment from the tool call arguments and uses
+    the model selector to determine the appropriate model tier. Falls back
+    to mid-tier if complexity assessment is missing or invalid.
+    
+    Args:
+        tool_call: The ConductResearch tool call with arguments
+        model_selector: The ModelSelector instance for tier resolution
+        configurable: The Configuration instance
+        
+    Returns:
+        TierDecision with the resolved tier and model configuration
+    """
+    args = tool_call.get("args", {})
+    
+    # Check if adaptive selection is enabled
+    if not configurable.adaptive_model_config.enable_adaptive_selection:
+        # Return fallback to configured research model
+        from open_deep_research.configuration import ModelTierConfig
+        fallback_config = ModelTierConfig(
+            model=configurable.research_model,
+            max_tokens=configurable.research_model_max_tokens,
+            context_window=128000
+        )
+        return TierDecision(
+            tier="mid",
+            model_config=fallback_config,
+            original_tier="mid",
+            was_overridden=False,
+            override_reason="Adaptive selection disabled, using fallback research_model"
+        )
+    
+    # Try to extract complexity assessment from tool call
+    complexity_data = args.get("complexity_assessment")
+    
+    if complexity_data is None:
+        # No complexity assessment provided - use mid-tier as safe default
+        logger.warning(
+            f"No complexity_assessment in ConductResearch call for topic: "
+            f"{args.get('research_topic', 'unknown')[:100]}... Using mid-tier default."
+        )
+        return TierDecision(
+            tier="mid",
+            model_config=configurable.adaptive_model_config.mid_tier,
+            original_tier="mid",
+            was_overridden=False,
+            override_reason="No complexity_assessment provided, defaulting to mid-tier"
+        )
+    
+    try:
+        # Parse complexity assessment - handle both dict and Pydantic model
+        if isinstance(complexity_data, dict):
+            # Handle optional nested models
+            features_data = complexity_data.get("features")
+            context_data = complexity_data.get("context_estimation")
+            
+            features = FeatureExtraction(**features_data) if features_data else None
+            context_estimation = ContextEstimation(**context_data) if context_data else None
+            
+            assessment = ComplexityAssessment(
+                tier=complexity_data.get("tier", "mid"),
+                estimated_confidence=complexity_data.get("estimated_confidence", 75),
+                failure_risk=complexity_data.get("failure_risk", "medium"),
+                features=features,
+                context_estimation=context_estimation,
+                quality_gap_prediction=complexity_data.get("quality_gap_prediction", "moderate"),
+                rationale=complexity_data.get("rationale", "")
+            )
+        elif isinstance(complexity_data, ComplexityAssessment):
+            assessment = complexity_data
+        else:
+            raise ValueError(f"Unexpected complexity_data type: {type(complexity_data)}")
+        
+        # Use model selector to resolve tier with overrides
+        tier_decision = model_selector.resolve_tier(assessment)
+        
+        logger.info(
+            f"Tier resolved for task: {args.get('research_topic', 'unknown')[:50]}... "
+            f"→ {tier_decision.tier} (original: {tier_decision.original_tier}, "
+            f"confidence: {assessment.estimated_confidence}%)"
+        )
+        
+        return tier_decision
+        
+    except Exception as e:
+        # Failed to parse complexity assessment - use mid-tier as safe default
+        logger.warning(
+            f"Failed to parse complexity_assessment: {e}. "
+            f"Using mid-tier default for safety."
+        )
+        return TierDecision(
+            tier="mid",
+            model_config=configurable.adaptive_model_config.mid_tier,
+            original_tier="mid",
+            was_overridden=False,
+            override_reason=f"Failed to parse complexity_assessment: {e}"
+        )
+
+
 async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Command[Literal["supervisor", "__end__"]]:
     """Execute tools called by the supervisor, including research delegation and strategic thinking.
     
@@ -291,16 +406,31 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
             allowed_conduct_research_calls = conduct_research_calls[:configurable.max_concurrent_research_units]
             overflow_conduct_research_calls = conduct_research_calls[configurable.max_concurrent_research_units:]
             
-            # Execute research tasks in parallel
-            research_tasks = [
-                researcher_subgraph.ainvoke({
+            # Initialize model selector for adaptive model selection
+            model_selector = ModelSelector(configurable.adaptive_model_config)
+            
+            # Execute research tasks in parallel with adaptive model selection
+            research_tasks = []
+            for tool_call in allowed_conduct_research_calls:
+                # Extract complexity assessment and resolve model tier
+                tier_decision = _resolve_tier_for_task(
+                    tool_call, 
+                    model_selector, 
+                    configurable
+                )
+                
+                # Create research task with tier-specific configuration
+                task = researcher_subgraph.ainvoke({
                     "researcher_messages": [
                         HumanMessage(content=tool_call["args"]["research_topic"])
                     ],
-                    "research_topic": tool_call["args"]["research_topic"]
-                }, config) 
-                for tool_call in allowed_conduct_research_calls
-            ]
+                    "research_topic": tool_call["args"]["research_topic"],
+                    # Pass tier configuration to researcher
+                    "selected_model": tier_decision.model_config.model,
+                    "selected_max_tokens": tier_decision.model_config.max_tokens,
+                    "selected_tier": tier_decision.tier
+                }, config)
+                research_tasks.append(task)
             
             tool_results = await asyncio.gather(*research_tasks)
             
@@ -388,12 +518,33 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
             "search API or add MCP tools to your configuration."
         )
     
-    # Step 2: Configure the researcher model with tools
+    # Step 2: Configure the researcher model with adaptive model selection
+    # Check if tier-specific model was passed from supervisor
+    selected_model = state.get("selected_model")
+    selected_max_tokens = state.get("selected_max_tokens")
+    selected_tier = state.get("selected_tier")
+    
+    if selected_model and selected_max_tokens:
+        # Use tier-specific model from adaptive selection
+        model_to_use = selected_model
+        max_tokens_to_use = selected_max_tokens
+        tier_tag = f"tier:{selected_tier}" if selected_tier else "tier:adaptive"
+        logger.debug(
+            f"Using adaptive model selection: {model_to_use} "
+            f"(tier: {selected_tier}, max_tokens: {max_tokens_to_use})"
+        )
+    else:
+        # Fallback to default research model
+        model_to_use = configurable.research_model
+        max_tokens_to_use = configurable.research_model_max_tokens
+        tier_tag = "tier:default"
+        logger.debug(f"Using default research model: {model_to_use}")
+    
     research_model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-        "tags": ["langsmith:nostream"]
+        "model": model_to_use,
+        "max_tokens": max_tokens_to_use,
+        "api_key": get_api_key_for_model(model_to_use, config),
+        "tags": ["langsmith:nostream", tier_tag]
     }
     
     # Prepare system prompt with MCP context if available

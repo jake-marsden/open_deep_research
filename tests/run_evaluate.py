@@ -23,12 +23,27 @@ max_researcher_iterations = 3     # changed from 6 to 3
 max_react_tool_calls = 6          # changed from 10 to 6
 summarization_model = "openai:google/gemini-2.5-flash-lite"      # $0.10/M input tokens | $0.40/M output tokens
 summarization_model_max_tokens = 8192
-research_model = "openai:gpt-4o-mini"                            # $0.15/M input tokens | $0.60/M output tokens
+research_model = "openai:gpt-4o-mini"                            # $0.15/M input tokens | $0.60/M output tokens (used for supervisor only when adaptive selection is enabled)
 research_model_max_tokens = 10000
 compression_model = "openai:google/gemini-2.0-flash-lite-001"    # $0.075/M input tokens | $0.30/M output tokens
 compression_model_max_tokens = 10000
 final_report_model = "openai:gpt-5-mini"                         # $0.25/M input tokens | $2/M output tokens
 final_report_model_max_tokens = 10000
+
+# Adaptive Model Selection Configuration
+enable_adaptive_selection = True  # Set to False to use research_model for all sub-researchers
+adaptive_low_tier_model = "openai:gpt-3.5-turbo"                 # $0.50/M input tokens | $1.50/M output tokens
+adaptive_low_tier_max_tokens = 4096
+adaptive_low_tier_context_window = 128000
+adaptive_mid_tier_model = "openai:gpt-4.1"                       # $2/M input tokens | $8/M output tokens
+adaptive_mid_tier_max_tokens = 8192
+adaptive_mid_tier_context_window = 128000
+adaptive_high_tier_model = "openai:gpt-4o"                       # $2.50/M input tokens | $10/M output tokens
+adaptive_high_tier_max_tokens = 16384
+adaptive_high_tier_context_window = 200000
+adaptive_confidence_threshold_low = 85   # Confidence threshold to use low-tier (below this → mid-tier)
+adaptive_confidence_threshold_mid = 70   # Confidence threshold to use mid-tier (below this → high-tier)
+adaptive_log_tier_decisions = True       # Log tier selection decisions for analysis
 
 async def target(
     inputs: dict,
@@ -54,6 +69,29 @@ async def target(
     config["configurable"]["compression_model_max_tokens"] = compression_model_max_tokens
     config["configurable"]["final_report_model"] = final_report_model
     config["configurable"]["final_report_model_max_tokens"] = final_report_model_max_tokens
+    
+    # Configure adaptive model selection
+    config["configurable"]["adaptive_model_config"] = {
+        "enable_adaptive_selection": enable_adaptive_selection,
+        "log_tier_decisions": adaptive_log_tier_decisions,
+        "low_tier": {
+            "model": adaptive_low_tier_model,
+            "max_tokens": adaptive_low_tier_max_tokens,
+            "context_window": adaptive_low_tier_context_window,
+        },
+        "mid_tier": {
+            "model": adaptive_mid_tier_model,
+            "max_tokens": adaptive_mid_tier_max_tokens,
+            "context_window": adaptive_mid_tier_context_window,
+        },
+        "high_tier": {
+            "model": adaptive_high_tier_model,
+            "max_tokens": adaptive_high_tier_max_tokens,
+            "context_window": adaptive_high_tier_context_window,
+        },
+        "confidence_threshold_low": adaptive_confidence_threshold_low,
+        "confidence_threshold_mid": adaptive_confidence_threshold_mid,
+    }
     # NOTE: We do not use MCP tools to stay consistent
     final_state = await graph.ainvoke(
         {"messages": [{"role": "user", "content": inputs["messages"][0]["content"]}]},
@@ -89,12 +127,18 @@ async def main():
         raise ValueError("No English examples found in dataset!")
     
     # Pass the actual examples instead of example_ids (which isn't supported)
+    # Build experiment prefix based on adaptive selection status
+    if enable_adaptive_selection:
+        experiment_prefix = f"OPEN_DEEP_RESEARCH_ADAPTIVE_{adaptive_low_tier_model}_{adaptive_mid_tier_model}_{adaptive_high_tier_model}"
+    else:
+        experiment_prefix = f"OPEN_DEEP_RESEARCH_EN_ONLY_{summarization_model}_{research_model}_{compression_model}_{final_report_model}"
+    
     return await client.aevaluate(
         target,
         data=english_examples,  # Pass filtered examples directly
         evaluators=evaluators,
-        experiment_prefix=f"OPEN_DEEP_RESEARCH_EN_ONLY_{summarization_model}_{research_model}_{compression_model}_{final_report_model}",
-        max_concurrency=1, # Changed from 3 to 1 to avoid rate limits
+        experiment_prefix=experiment_prefix,
+        max_concurrency=3, # Changed from 3 to 1 to avoid rate limits
         metadata={
             "system": "open_deep_research",
             "language_filter": "en_only",
@@ -113,6 +157,17 @@ async def main():
             "compression_model_max_tokens": compression_model_max_tokens,
             "final_report_model": final_report_model,
             "final_report_model_max_tokens": final_report_model_max_tokens,
+            # Adaptive model selection metadata
+            "adaptive_selection_enabled": enable_adaptive_selection,
+            "adaptive_low_tier_model": adaptive_low_tier_model,
+            "adaptive_low_tier_max_tokens": adaptive_low_tier_max_tokens,
+            "adaptive_mid_tier_model": adaptive_mid_tier_model,
+            "adaptive_mid_tier_max_tokens": adaptive_mid_tier_max_tokens,
+            "adaptive_high_tier_model": adaptive_high_tier_model,
+            "adaptive_high_tier_max_tokens": adaptive_high_tier_max_tokens,
+            "adaptive_confidence_threshold_low": adaptive_confidence_threshold_low,
+            "adaptive_confidence_threshold_mid": adaptive_confidence_threshold_mid,
+            "adaptive_log_tier_decisions": adaptive_log_tier_decisions,
         }
     )
 

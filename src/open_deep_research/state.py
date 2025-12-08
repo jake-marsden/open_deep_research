@@ -1,7 +1,7 @@
 """Graph state definitions and data structures for the Deep Research agent."""
 
 import operator
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 from langchain_core.messages import MessageLikeRepresentation
 from langgraph.graph import MessagesState
@@ -10,12 +10,81 @@ from typing_extensions import TypedDict
 
 
 ###################
+# Adaptive Model Selection Schemas
+###################
+
+class FeatureExtraction(BaseModel):
+    """Task features for complexity classification."""
+    
+    # Required field
+    task_type: Literal["retrieval", "reasoning", "synthesis", "generation"] = Field(
+        description="retrieval=fact lookup, reasoning=inference, synthesis=combining sources, generation=creative"
+    )
+    # Optional fields with sensible defaults
+    reasoning_pattern: Literal["single-hop", "multi-hop", "causal", "comparative", "none"] = Field(
+        default="multi-hop"
+    )
+    domain_signal: Literal["general", "specialized", "expert-level"] = Field(
+        default="general"
+    )
+    context_difficulty: Literal["clear", "ambiguous", "contradictory"] = Field(
+        default="clear"
+    )
+    requires_narrative_reasoning: bool = Field(default=False)
+    requires_symbolic_execution: bool = Field(default=False)
+
+
+class ContextEstimation(BaseModel):
+    """Token estimation - optional, system can infer from other features."""
+    
+    estimated_input_tokens: int = Field(default=3000, ge=0)
+    estimated_output_tokens: int = Field(default=1000, ge=0)
+    retrieval_breadth: Literal["narrow", "moderate", "extensive"] = Field(default="moderate")
+    context_accumulation: Literal["minimal", "moderate", "heavy"] = Field(default="moderate")
+
+
+class ComplexityAssessment(BaseModel):
+    """Complexity assessment for adaptive model selection.
+    
+    Only tier, estimated_confidence, and failure_risk are essential.
+    Other fields have sensible defaults.
+    """
+    
+    # Essential fields
+    tier: Literal["low", "mid", "high"] = Field(
+        description="low=simple facts, mid=multi-source synthesis, high=complex/ambiguous"
+    )
+    estimated_confidence: int = Field(
+        default=75,
+        ge=0, 
+        le=100,
+        description="Confidence (0-100%) that a simpler model would succeed"
+    )
+    failure_risk: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        description="Impact if task fails: low=recoverable, high=critical"
+    )
+    
+    # Optional fields with defaults
+    features: Optional[FeatureExtraction] = Field(default=None)
+    context_estimation: Optional[ContextEstimation] = Field(default=None)
+    quality_gap_prediction: Literal["negligible", "moderate", "significant"] = Field(
+        default="moderate"
+    )
+    rationale: str = Field(default="")
+
+
+###################
 # Structured Outputs
 ###################
 class ConductResearch(BaseModel):
-    """Call this tool to conduct research on a specific topic."""
+    """Call this tool to conduct research on a specific topic with complexity assessment."""
+    
     research_topic: str = Field(
         description="The topic to research. Should be a single topic, and should be described in high detail (at least a paragraph).",
+    )
+    complexity_assessment: ComplexityAssessment = Field(
+        description="Assessment of task complexity for adaptive model selection. Analyze the research topic to determine the appropriate model tier."
     )
 
 class ResearchComplete(BaseModel):
@@ -88,6 +157,10 @@ class ResearcherState(TypedDict):
     research_topic: str
     compressed_research: str
     raw_notes: Annotated[list[str], override_reducer] = []
+    # Adaptive model selection - tier config passed from supervisor
+    selected_model: Optional[str] = None
+    selected_max_tokens: Optional[int] = None
+    selected_tier: Optional[str] = None
 
 class ResearcherOutputState(BaseModel):
     """Output state from individual researchers."""

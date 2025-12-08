@@ -1,0 +1,11 @@
+Adaptive Model Selection - Tier Classification Counts
+=======================================================
+Low-tier:  0
+Mid-tier:  143
+High-tier: 17
+Total:     160
+
+Distribution:
+  Low:  0.0%
+  Mid:  89.4%
+  High: 10.6%

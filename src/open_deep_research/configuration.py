@@ -35,6 +35,144 @@ class MCPConfig(BaseModel):
     )
     """Whether the MCP server requires authentication"""
 
+
+class ModelTierConfig(BaseModel):
+    """Configuration for a single model tier in the adaptive model selection system.
+    
+    Each tier represents a class of models with specific characteristics:
+    - Low-tier: Fast, cost-efficient for routine tasks with negligible quality gap
+    - Mid-tier: Workhorse tier with highest reliability-to-cost ratio
+    - High-tier: Insurance tier for complex tasks where failure is unacceptable
+    """
+    
+    model: str = Field(
+        description="Model identifier (e.g., 'openai:gpt-4o-mini', 'anthropic:claude-3-haiku')"
+    )
+    max_tokens: int = Field(
+        description="Maximum output tokens for this tier"
+    )
+    context_window: int = Field(
+        default=128000,
+        description="Maximum context window size for this model tier (for token limit enforcement)"
+    )
+    expected_success_rate: float = Field(
+        default=0.90,
+        ge=0.0,
+        le=1.0,
+        description="Expected success rate on tier-appropriate tasks (0.0-1.0), used for reliability-to-cost optimization"
+    )
+    cost_per_1k_input_tokens: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Approximate cost per 1K input tokens (for cost tracking and optimization)"
+    )
+    cost_per_1k_output_tokens: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Approximate cost per 1K output tokens (for cost tracking and optimization)"
+    )
+    
+    @property
+    def reliability_to_cost_ratio(self) -> float:
+        """Calculate reliability-to-cost ratio. Higher is better.
+        
+        Used for mid-tier selection per Model Multiplexing paper's LEC principle.
+        """
+        avg_cost = (self.cost_per_1k_input_tokens + self.cost_per_1k_output_tokens) / 2
+        if avg_cost == 0:
+            return float('inf')
+        return self.expected_success_rate / avg_cost
+
+
+class AdaptiveModelConfig(BaseModel):
+    """Configuration for adaptive model selection across tiers.
+    
+    Implements insights from academic papers:
+    - MDAgents: Three-tier complexity classification
+    - Hybrid LLM: Quality gap-based tier eligibility
+    - Early Abstention: Confidence thresholds for safe defaults
+    - FrugalGPT: Context window constraints for tier escalation
+    - Model Multiplexing: Reliability-to-cost optimization for mid-tier
+    """
+    
+    # Model Tier Definitions
+    low_tier: ModelTierConfig = Field(
+        default_factory=lambda: ModelTierConfig(
+            model="openai:gpt-3.5-turbo", # $0.50/M input tokens | $1.50/M output tokens
+            max_tokens=4096,
+            context_window=128000,
+            expected_success_rate=0.95,
+            cost_per_1k_input_tokens=0.00015,
+            cost_per_1k_output_tokens=0.0006
+        ),
+        description="Fast, cost-efficient model for routine tasks where quality gap is negligible (~20% of tasks)"
+    )
+    
+    mid_tier: ModelTierConfig = Field(
+        default_factory=lambda: ModelTierConfig(
+            model="openai:gpt-4o-mini", # $0.15/M input tokens | $0.60/M output tokens
+            max_tokens=8192,
+            context_window=128000,
+            expected_success_rate=0.92,
+            cost_per_1k_input_tokens=0.0025,
+            cost_per_1k_output_tokens=0.01
+        ),
+        description="Workhorse tier with highest reliability-to-cost ratio, handles majority of tasks (~60-70%)"
+    )
+    
+    high_tier: ModelTierConfig = Field(
+        default_factory=lambda: ModelTierConfig(
+            model="openai:gpt-4o", # $2.50/M input tokens | $10/M output tokens
+            max_tokens=16384,
+            context_window=200000,
+            expected_success_rate=0.98,
+            cost_per_1k_input_tokens=0.015,
+            cost_per_1k_output_tokens=0.06
+        ),
+        description="Insurance tier for complex tasks where mid-tier failure risk is unacceptable (~15-25% of tasks)"
+    )
+    
+    # Confidence Thresholds (Early Abstention principle)
+    confidence_threshold_low: int = Field(
+        default=85,
+        ge=0,
+        le=100,
+        description="Minimum confidence % to use low-tier model (below this → mid-tier)"
+    )
+    confidence_threshold_mid: int = Field(
+        default=70,
+        ge=0,
+        le=100,
+        description="Minimum confidence % to use mid-tier model (below this → high-tier)"
+    )
+    
+    # Context Window Safety Margin
+    context_window_safety_margin: float = Field(
+        default=0.8,
+        ge=0.5,
+        le=1.0,
+        description="Safety margin for context window (0.8 = use 80% of available context to avoid overflow)"
+    )
+    
+    # Feature Flags
+    enable_adaptive_selection: bool = Field(
+        default=True,
+        description="Enable/disable adaptive selection (when disabled, falls back to research_model)"
+    )
+    log_tier_decisions: bool = Field(
+        default=True,
+        description="Log tier selection decisions for analysis and threshold tuning"
+    )
+    
+    def get_tier_config(self, tier: str) -> ModelTierConfig:
+        """Get the model configuration for a specific tier."""
+        tier_map = {
+            "low": self.low_tier,
+            "mid": self.mid_tier,
+            "high": self.high_tier
+        }
+        return tier_map.get(tier, self.mid_tier)
+
 class Configuration(BaseModel):
     """Main configuration class for the Deep Research agent."""
     
@@ -156,7 +294,7 @@ class Configuration(BaseModel):
             "x_oap_ui_config": {
                 "type": "text",
                 "default": "openai:gpt-4o-mini",
-                "description": "Model for conducting research. NOTE: Make sure your Researcher Model supports the selected search API."
+                "description": "Model for the research supervisor and fallback for sub-researchers when adaptive model selection is disabled. NOTE: Make sure your model supports the selected search API."
             }
         }
     )
@@ -228,6 +366,17 @@ class Configuration(BaseModel):
             "x_oap_ui_config": {
                 "type": "text",
                 "description": "Any additional instructions to pass along to the Agent regarding the MCP tools that are available to it."
+            }
+        }
+    )
+    
+    # Adaptive Model Selection Configuration
+    adaptive_model_config: AdaptiveModelConfig = Field(
+        default_factory=AdaptiveModelConfig,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "object",
+                "description": "Configuration for adaptive model selection based on task complexity. When enabled, sub-tasks are routed to appropriate model tiers (low/mid/high) based on complexity assessment."
             }
         }
     )
