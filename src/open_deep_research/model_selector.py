@@ -19,6 +19,7 @@ from typing import Optional
 
 from open_deep_research.configuration import AdaptiveModelConfig, ModelTierConfig
 from open_deep_research.state import ComplexityAssessment, ContextEstimation, FeatureExtraction
+from open_deep_research.tier_logger import get_tier_logger
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,10 @@ class ModelSelector:
         # Log the decision if enabled
         if self.config.log_tier_decisions:
             self._log_decision(assessment, features, decision)
+        
+        # Track tier classification in logs.txt
+        tier_logger = get_tier_logger()
+        tier_logger.log_tier_classification(current_tier)
         
         return decision
     
