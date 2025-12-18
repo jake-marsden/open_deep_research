@@ -69,21 +69,34 @@ class ModelSelector:
         """
         self.config = config
     
-    def resolve_tier(self, assessment: ComplexityAssessment) -> TierDecision:
-        """Resolve the appropriate model tier based on complexity assessment.
+    def resolve_tier(self, assessment: ComplexityAssessment, position_based_tier: str = None) -> TierDecision:
+        """Resolve the appropriate model tier based on position and complexity assessment.
         
-        This is the main entry point for tier selection. It applies multiple
-        decision rules in sequence to determine the final tier.
+        This is the main entry point for tier selection. The tier is now primarily
+        determined by the task's position in the ordered list of 3 sub-tasks:
+        - Position 0 (1st task, simplest) → low tier
+        - Position 1 (2nd task, moderate) → mid tier  
+        - Position 2 (3rd task, most complex) → high tier
+        
+        Safety escalation overrides can still upgrade the tier if needed.
         
         Args:
             assessment: ComplexityAssessment from the supervisor containing
-                       tier recommendation and optional feature extraction.
+                       complexity_rank and optional feature extraction.
+            position_based_tier: The tier determined by task position (low/mid/high).
+                               If not provided, derives from assessment.complexity_rank.
         
         Returns:
             TierDecision with the resolved tier and decision metadata.
         """
-        original_tier = assessment.tier
-        current_tier = assessment.tier
+        # Determine the original tier from position or complexity_rank
+        if position_based_tier:
+            original_tier = position_based_tier
+        else:
+            # Derive tier from complexity_rank: 1→low, 2→mid, 3→high
+            original_tier = assessment.get_tier()
+        
+        current_tier = original_tier
         override_reason = None
         
         # Ensure features exist (use defaults if not provided)
@@ -92,9 +105,14 @@ class ModelSelector:
         context_est = assessment.context_estimation or self._infer_context_estimation(features)
         
         # Stage 1: Safety Escalation Overrides (Early Abstention, MoT)
+        # Only escalate, never downgrade from position-based assignment
         escalation_result = self._check_safety_escalation(assessment, features, current_tier)
         if escalation_result:
-            current_tier, override_reason = escalation_result
+            new_tier, reason = escalation_result
+            # Only apply if it's an escalation (higher tier), not a downgrade
+            tier_order = {"low": 0, "mid": 1, "high": 2}
+            if tier_order.get(new_tier, 1) > tier_order.get(current_tier, 1):
+                current_tier, override_reason = new_tier, reason
         
         # Stage 2: Context Window Constraint Check (FrugalGPT)
         if not override_reason:  # Only if not already escalated
@@ -102,12 +120,9 @@ class ModelSelector:
             if context_result:
                 current_tier, override_reason = context_result
         
-        # Stage 3: Cost Optimization Downgrade (Hybrid LLM quality gap)
-        # Only apply if we haven't escalated and conditions permit
-        if not override_reason and self._can_downgrade(assessment, current_tier):
-            downgrade_result = self._apply_cost_optimization(assessment, features, current_tier)
-            if downgrade_result:
-                current_tier, override_reason = downgrade_result
+        # Note: Cost optimization downgrades are disabled for position-based tier assignment
+        # The position-based mapping is the primary tier determination strategy
+        # Downgrades would undermine the deliberate complexity-based task decomposition
         
         # Get the final tier configuration
         model_config = self.config.get_tier_config(current_tier)
@@ -428,17 +443,19 @@ class ModelSelector:
 
 def select_model_for_task(
     assessment: ComplexityAssessment,
-    config: AdaptiveModelConfig
+    config: AdaptiveModelConfig,
+    position_based_tier: str = None
 ) -> TierDecision:
     """Convenience function for selecting model tier.
     
     Args:
         assessment: ComplexityAssessment from the supervisor.
         config: AdaptiveModelConfig with tier definitions.
+        position_based_tier: Optional tier determined by task position (low/mid/high).
     
     Returns:
         TierDecision with the resolved tier and model configuration.
     """
     selector = ModelSelector(config)
-    return selector.resolve_tier(assessment)
+    return selector.resolve_tier(assessment, position_based_tier)
 

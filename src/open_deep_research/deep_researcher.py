@@ -234,17 +234,21 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
 
 def _resolve_tier_for_task(
     tool_call: dict,
+    task_index: int,
     model_selector: ModelSelector,
     configurable: Configuration
 ) -> TierDecision:
-    """Resolve the model tier for a ConductResearch task.
+    """Resolve the model tier for a ConductResearch task using position-based mapping.
     
-    Extracts the complexity assessment from the tool call arguments and uses
-    the model selector to determine the appropriate model tier. Falls back
-    to mid-tier if complexity assessment is missing or invalid.
+    The tier is determined programmatically based on the task's position in the 
+    ordered list of 3 sub-tasks:
+    - Position 0 (1st task, simplest) → low tier
+    - Position 1 (2nd task, moderate) → mid tier
+    - Position 2 (3rd task, most complex) → high tier
     
     Args:
         tool_call: The ConductResearch tool call with arguments
+        task_index: The position of this task in the ordered list (0, 1, or 2)
         model_selector: The ModelSelector instance for tier resolution
         configurable: The Configuration instance
         
@@ -270,21 +274,27 @@ def _resolve_tier_for_task(
             override_reason="Adaptive selection disabled, using fallback research_model"
         )
     
-    # Try to extract complexity assessment from tool call
+    # Map task position to tier (programmatic assignment)
+    # Position 0 (1st/simplest) → low, Position 1 (2nd/moderate) → mid, Position 2 (3rd/complex) → high
+    position_to_tier = {0: "low", 1: "mid", 2: "high"}
+    assigned_tier = position_to_tier.get(task_index, "mid")  # Default to mid for any overflow tasks
+    
+    # Try to extract complexity assessment for additional context (optional)
     complexity_data = args.get("complexity_assessment")
     
     if complexity_data is None:
-        # No complexity assessment provided - use mid-tier as safe default
-        logger.warning(
+        # No complexity assessment provided - use position-based tier
+        logger.info(
             f"No complexity_assessment in ConductResearch call for topic: "
-            f"{args.get('research_topic', 'unknown')[:100]}... Using mid-tier default."
+            f"{args.get('research_topic', 'unknown')[:100]}... Using position-based tier: {assigned_tier}"
         )
+        tier_config = configurable.adaptive_model_config.get_tier_config(assigned_tier)
         return TierDecision(
-            tier="mid",
-            model_config=configurable.adaptive_model_config.mid_tier,
-            original_tier="mid",
+            tier=assigned_tier,
+            model_config=tier_config,
+            original_tier=assigned_tier,
             was_overridden=False,
-            override_reason="No complexity_assessment provided, defaulting to mid-tier"
+            override_reason=f"Position-based tier assignment: task {task_index + 1} of 3 → {assigned_tier}"
         )
     
     try:
@@ -297,8 +307,11 @@ def _resolve_tier_for_task(
             features = FeatureExtraction(**features_data) if features_data else None
             context_estimation = ContextEstimation(**context_data) if context_data else None
             
+            # Get complexity_rank if provided, otherwise infer from task_index
+            complexity_rank = complexity_data.get("complexity_rank", task_index + 1)
+            
             assessment = ComplexityAssessment(
-                tier=complexity_data.get("tier", "mid"),
+                complexity_rank=complexity_rank,
                 estimated_confidence=complexity_data.get("estimated_confidence", 75),
                 failure_risk=complexity_data.get("failure_risk", "medium"),
                 features=features,
@@ -311,29 +324,30 @@ def _resolve_tier_for_task(
         else:
             raise ValueError(f"Unexpected complexity_data type: {type(complexity_data)}")
         
-        # Use model selector to resolve tier with overrides
-        tier_decision = model_selector.resolve_tier(assessment)
+        # Use model selector to resolve tier with the position-based tier as primary
+        tier_decision = model_selector.resolve_tier(assessment, assigned_tier)
         
         logger.info(
-            f"Tier resolved for task: {args.get('research_topic', 'unknown')[:50]}... "
-            f"→ {tier_decision.tier} (original: {tier_decision.original_tier}, "
+            f"Tier resolved for task {task_index + 1}/3: {args.get('research_topic', 'unknown')[:50]}... "
+            f"→ {tier_decision.tier} (position-based: {assigned_tier}, "
             f"confidence: {assessment.estimated_confidence}%)"
         )
         
         return tier_decision
         
     except Exception as e:
-        # Failed to parse complexity assessment - use mid-tier as safe default
+        # Failed to parse complexity assessment - use position-based tier
         logger.warning(
             f"Failed to parse complexity_assessment: {e}. "
-            f"Using mid-tier default for safety."
+            f"Using position-based tier: {assigned_tier}"
         )
+        tier_config = configurable.adaptive_model_config.get_tier_config(assigned_tier)
         return TierDecision(
-            tier="mid",
-            model_config=configurable.adaptive_model_config.mid_tier,
-            original_tier="mid",
+            tier=assigned_tier,
+            model_config=tier_config,
+            original_tier=assigned_tier,
             was_overridden=False,
-            override_reason=f"Failed to parse complexity_assessment: {e}"
+            override_reason=f"Failed to parse complexity_assessment, using position-based tier: {assigned_tier}"
         )
 
 
@@ -402,19 +416,22 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
     
     if conduct_research_calls:
         try:
-            # Limit concurrent research units to prevent resource exhaustion
-            allowed_conduct_research_calls = conduct_research_calls[:configurable.max_concurrent_research_units]
-            overflow_conduct_research_calls = conduct_research_calls[configurable.max_concurrent_research_units:]
+            # Limit to exactly 3 sub-tasks for position-based tier mapping
+            # Position 0 → low tier, Position 1 → mid tier, Position 2 → high tier
+            MAX_SUBTASKS = 3
+            allowed_conduct_research_calls = conduct_research_calls[:MAX_SUBTASKS]
+            overflow_conduct_research_calls = conduct_research_calls[MAX_SUBTASKS:]
             
             # Initialize model selector for adaptive model selection
             model_selector = ModelSelector(configurable.adaptive_model_config)
             
-            # Execute research tasks in parallel with adaptive model selection
+            # Execute research tasks in parallel with position-based tier assignment
             research_tasks = []
-            for tool_call in allowed_conduct_research_calls:
-                # Extract complexity assessment and resolve model tier
+            for task_index, tool_call in enumerate(allowed_conduct_research_calls):
+                # Resolve model tier based on task position (0→low, 1→mid, 2→high)
                 tier_decision = _resolve_tier_for_task(
-                    tool_call, 
+                    tool_call,
+                    task_index,
                     model_selector, 
                     configurable
                 )

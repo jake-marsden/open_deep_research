@@ -205,10 +205,10 @@ class Configuration(BaseModel):
             "x_oap_ui_config": {
                 "type": "slider",
                 "default": 3,
-                "min": 1,
-                "max": 20,
+                "min": 3,
+                "max": 3,
                 "step": 1,
-                "description": "Maximum number of research units to run concurrently. This will allow the researcher to use multiple sub-agents to conduct research. Note: with more concurrency, you may run into rate limits."
+                "description": "Number of research sub-tasks to run concurrently. Fixed at 3 for position-based tier mapping: task 1 (simplest) → low tier, task 2 (moderate) → mid tier, task 3 (complex) → high tier."
             }
         }
     )

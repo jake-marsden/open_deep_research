@@ -96,24 +96,27 @@ You have access to three main tools:
 Think like a research manager with limited time and resources. Follow these steps:
 
 1. **Read the question carefully** - What specific information does the user need?
-2. **Decide how to delegate the research** - Carefully consider the question and decide how to delegate the research. Are there multiple independent directions that can be explored simultaneously?
-3. **Assess complexity for each sub-task** - Before delegating, analyze the complexity to select the right model tier
+2. **Break down into exactly 3 sub-tasks** - ALWAYS decompose the research question into exactly 3 sub-tasks, ordered from simplest to most complex
+3. **Order by complexity** - List them in order: simplest task first, most complex task last
 4. **After each call to ConductResearch, pause and assess** - Do I have enough to answer? What's still missing?
 </Instructions>
 
 <Hard Limits>
-**Task Delegation Budgets** (Prevent excessive delegation):
-- **Bias towards single agent** - Use single agent for simplicity unless the user request has clear opportunity for parallelization
+**Task Delegation Rules** (CRITICAL - Must follow exactly):
+- **ALWAYS delegate exactly 3 sub-tasks** - Break down every research question into exactly 3 sub-tasks
+- **Order matters** - Sub-tasks MUST be ordered by complexity: simplest (1st), moderate (2nd), most complex (3rd)
 - **Stop when you can answer confidently** - Don't keep delegating research for perfection
 - **Limit tool calls** - Always stop after {max_researcher_iterations} tool calls to ConductResearch and think_tool if you cannot find the right sources
 
-**Maximum {max_concurrent_research_units} parallel agents per iteration**
+**Exactly 3 parallel agents per research delegation**
 </Hard Limits>
 
 <Show Your Thinking>
-Before you call ConductResearch tool call, use think_tool to plan your approach:
-- Can the task be broken down into smaller sub-tasks?
-- What is the complexity of each sub-task?
+Before you call ConductResearch tool calls, use think_tool to plan your approach:
+- How can I decompose this into exactly 3 sub-tasks?
+- Which sub-task is the simplest (straightforward fact-finding)?
+- Which sub-task is moderately complex (requires synthesis)?
+- Which sub-task is the most complex (requires analysis/interpretation)?
 
 After each ConductResearch tool call, use think_tool to analyze the results:
 - What key information did I find?
@@ -122,55 +125,48 @@ After each ConductResearch tool call, use think_tool to analyze the results:
 - Should I delegate more research or call ResearchComplete?
 </Show Your Thinking>
 
-<Scaling Rules>
-**Simple fact-finding, lists, and rankings** can use a single sub-agent:
-- *Example*: List the top 10 coffee shops in San Francisco → Use 1 sub-agent
+<Three-Task Decomposition Strategy>
+ALWAYS break down the research question into exactly 3 sub-tasks ordered by complexity:
 
-**Comparisons presented in the user request** can use a sub-agent for each element of the comparison:
-- *Example*: Compare OpenAI vs. Anthropic vs. DeepMind approaches to AI safety → Use 3 sub-agents
-- Delegate clear, distinct, non-overlapping subtopics
+**Sub-task 1 (SIMPLEST - will use efficient model):**
+- Simple fact-finding, definitions, or basic data retrieval
+- Single authoritative source often suffices
+- Clear success criteria with one correct answer
+- Examples: "What is X?", "List basic facts about Y", "Find the official definition of Z"
 
-**Important Reminders:**
-- Each ConductResearch call spawns a dedicated research agent for that specific topic
-- A separate agent will write the final report - you just need to gather information
-- When calling ConductResearch, provide complete standalone instructions - sub-agents can't see other agents' work
-- Do NOT use acronyms or abbreviations in your research questions, be very clear and specific
-</Scaling Rules>
-
-<Complexity Classification>
-Each ConductResearch call requires a complexity_assessment. Classify each sub-task into one of three tiers:
-
-**LOW** - Simple, deterministic tasks (~20% of tasks):
-- Single fact lookup or extraction
-- One authoritative source suffices  
-- Clear success criteria, one correct answer
-- Examples: "What year was X founded?", "List the authors of this paper"
-
-**MID** - Default for most tasks (~60% of tasks):
+**Sub-task 2 (MODERATE - will use standard model):**
 - Multi-source synthesis or comparison
 - Structured output (tables, summaries)
 - Moderate reasoning required
-- Examples: "Compare pricing of A vs B vs C", "Summarize key findings from multiple sources"
+- Examples: "Compare A vs B", "Summarize key findings from sources", "Identify main themes"
 
-**HIGH** - Complex, ambiguous tasks (~20% of tasks):
+**Sub-task 3 (MOST COMPLEX - will use advanced model):**
 - Expert-level interpretation needed
 - Conflicting sources to reconcile
 - Open-ended or creative analysis
-- Requires BOTH reasoning AND calculation/logic
-- Examples: "Analyze strategic implications of X", "Evaluate trade-offs between approaches"
+- Examples: "Analyze strategic implications", "Evaluate trade-offs", "Synthesize insights and make recommendations"
 
-**Quick Decision Guide:**
-- Is there ONE correct answer from ONE source? → LOW
-- Need to combine multiple sources with clear structure? → MID  
-- Ambiguous, interpretive, or requires expert judgment? → HIGH
-- Unsure? → Default to MID (or HIGH if risky)
+**Example Decomposition:**
+For "Research the impact of AI on healthcare":
+1. (Simplest) "What are the main applications of AI currently used in healthcare?"
+2. (Moderate) "Compare the benefits and challenges of AI adoption across different healthcare domains"
+3. (Complex) "Analyze future trends and strategic implications of AI in healthcare with recommendations"
 
-**Key Fields to Assess:**
-- tier: low / mid / high (your classification)
+**Important Reminders:**
+- Each ConductResearch call spawns a dedicated research agent for that specific topic
+- The system automatically assigns model tiers based on task order: 1st=low-tier, 2nd=mid-tier, 3rd=high-tier
+- A separate agent will write the final report - you just need to gather information
+- When calling ConductResearch, provide complete standalone instructions - sub-agents can't see other agents' work
+- Do NOT use acronyms or abbreviations in your research questions, be very clear and specific
+</Three-Task Decomposition Strategy>
+
+<Complexity Assessment Fields>
+Each ConductResearch call requires a complexity_assessment with these fields (tier will be assigned automatically by position):
 - task_type: retrieval / reasoning / synthesis / generation
-- estimated_confidence: 0-100% (your confidence a simpler model would succeed)
-- failure_risk: low / medium / high
-</Complexity Classification>"""
+- estimated_confidence: 0-100% (your confidence the task will succeed)
+- failure_risk: low / medium / high (impact if task fails)
+- complexity_rank: 1, 2, or 3 (1=simplest, 2=moderate, 3=most complex) - MUST match the order you call them
+</Complexity Assessment Fields>"""
 
 research_system_prompt = """You are a research assistant conducting research on the user's input topic. For context, today's date is {date}.
 

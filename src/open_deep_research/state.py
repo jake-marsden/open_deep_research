@@ -46,19 +46,21 @@ class ContextEstimation(BaseModel):
 class ComplexityAssessment(BaseModel):
     """Complexity assessment for adaptive model selection.
     
-    Only tier, estimated_confidence, and failure_risk are essential.
-    Other fields have sensible defaults.
+    The tier is now determined programmatically based on complexity_rank:
+    - complexity_rank 1 (simplest) → low tier
+    - complexity_rank 2 (moderate) → mid tier  
+    - complexity_rank 3 (most complex) → high tier
     """
     
     # Essential fields
-    tier: Literal["low", "mid", "high"] = Field(
-        description="low=simple facts, mid=multi-source synthesis, high=complex/ambiguous"
+    complexity_rank: Literal[1, 2, 3] = Field(
+        description="Complexity rank: 1=simplest task, 2=moderate task, 3=most complex task. Tier is assigned automatically based on rank."
     )
     estimated_confidence: int = Field(
         default=75,
         ge=0, 
         le=100,
-        description="Confidence (0-100%) that a simpler model would succeed"
+        description="Confidence (0-100%) that the task will succeed"
     )
     failure_risk: Literal["low", "medium", "high"] = Field(
         default="medium",
@@ -72,6 +74,15 @@ class ComplexityAssessment(BaseModel):
         default="moderate"
     )
     rationale: str = Field(default="")
+    
+    def get_tier(self) -> str:
+        """Get the model tier based on complexity rank.
+        
+        Returns:
+            'low' for rank 1, 'mid' for rank 2, 'high' for rank 3
+        """
+        tier_map = {1: "low", 2: "mid", 3: "high"}
+        return tier_map.get(self.complexity_rank, "mid")
 
 
 ###################

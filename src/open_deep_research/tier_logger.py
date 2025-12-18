@@ -59,12 +59,14 @@ class TierLogger:
             # Parse the counts from the file
             for line in lines:
                 line = line.strip()
-                if line.startswith("Low-tier:"):
-                    counts["low-tier"] = int(line.split(":")[1].strip())
-                elif line.startswith("Mid-tier:"):
-                    counts["mid-tier"] = int(line.split(":")[1].strip())
-                elif line.startswith("High-tier:"):
-                    counts["high-tier"] = int(line.split(":")[1].strip())
+                # Handle both old format "Low-tier:  X" and new format "Low-tier  (Task 1 - Simplest):  X"
+                if line.startswith("Low-tier"):
+                    # Extract the number after the last colon
+                    counts["low-tier"] = int(line.split(":")[-1].strip())
+                elif line.startswith("Mid-tier"):
+                    counts["mid-tier"] = int(line.split(":")[-1].strip())
+                elif line.startswith("High-tier"):
+                    counts["high-tier"] = int(line.split(":")[-1].strip())
         
         except Exception as e:
             # If parsing fails, return default counts
@@ -89,12 +91,13 @@ class TierLogger:
         high_pct = (high / total * 100) if total > 0 else 0.0
         
         # Format the output
-        output = f"""Adaptive Model Selection - Tier Classification Counts
-=======================================================
-Low-tier:  {low}
-Mid-tier:  {mid}
-High-tier: {high}
-Total:     {total}
+        output = f"""Adaptive Model Selection - Position-Based Tier Classification Counts
+(Task 1 → Low, Task 2 → Mid, Task 3 → High)
+=====================================================================
+Low-tier  (Task 1 - Simplest):  {low}
+Mid-tier  (Task 2 - Moderate):  {mid}
+High-tier (Task 3 - Complex):   {high}
+Total:                          {total}
 
 Distribution:
   Low:  {low_pct:.1f}%
