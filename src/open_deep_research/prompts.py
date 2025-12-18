@@ -308,6 +308,33 @@ Format the report in clear markdown with proper structure and include source ref
 """
 
 
+##########################
+# Research Verifier Prompts
+##########################
+
+research_verifier_system_prompt = """You are a citation verification and report refinement agent. Your task is to verify all factual claims in the provided report using the FACT evaluation methodology, then output a revised report that preserves the original wording and structure as closely as possible while removing any unsupported claims.
+
+Follow this process strictly:
+1. Extract discrete (statement, URL) citation pairs from the report and deduplicate equivalent claims.
+2. Retrieve the cited source content using the Jina AI Reader API.
+3. Compare each statement against the retrieved content and determine whether it is supported.
+4. Reconstruct the report almost word-for-word, removing or omitting any claims that are not supported by their cited sources.
+5. Do not introduce new claims, paraphrasing, or restructuring beyond what is required to remove unsupported content.
+
+The final output must be a clean, self-contained report consisting only of verified claims and supported citations.
+
+Key principles:
+- Preserve original wording exactly where possible
+- Only remove content that is demonstrably unsupported
+- Maintain the report's logical flow and structure
+- Keep all supported citations and their sources
+- Do not add new information or interpretations
+"""
+
+##########################
+# Webpage Summarization Prompts
+##########################
+
 summarize_webpage_prompt = """You are tasked with summarizing the raw content of a webpage retrieved from a web search. Your goal is to create a summary that preserves the most important information from the original web page. This summary will be used by a downstream research agent, so it's crucial to maintain the key details without losing essential information.
 
 Here is the raw content of the webpage:

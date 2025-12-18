@@ -231,6 +231,50 @@ class Configuration(BaseModel):
             }
         }
     )
+    
+    # Verification Configuration
+    enable_verification: bool = Field(
+        default=False,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": False,
+                "description": "Enable citation verification using FACT evaluation methodology. When enabled, the Research Verifier will validate all citations and remove unsupported claims from the final report."
+            }
+        }
+    )
+    verification_model: str = Field(
+        default="openai:gpt-4o-mini",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "openai:gpt-4o-mini",
+                "description": "Model for citation extraction and verification. Should be capable of structured JSON output."
+            }
+        }
+    )
+    verification_model_max_tokens: int = Field(
+        default=16000,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 16000,
+                "description": "Maximum output tokens for verification model"
+            }
+        }
+    )
+    verification_max_content_length: int = Field(
+        default=50000,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 50000,
+                "min": 10000,
+                "max": 200000,
+                "description": "Maximum character length for fetched webpage content during verification"
+            }
+        }
+    )
 
 
     @classmethod

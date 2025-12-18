@@ -1,6 +1,7 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
+import logging
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
@@ -26,6 +27,7 @@ from open_deep_research.prompts import (
     final_report_generation_prompt,
     lead_researcher_prompt,
     research_system_prompt,
+    research_verifier_system_prompt,
     transform_messages_into_research_topic_prompt,
 )
 from open_deep_research.state import (
@@ -51,6 +53,9 @@ from open_deep_research.utils import (
     remove_up_to_last_ai_message,
     think_tool,
 )
+from open_deep_research.verifier_utils import verify_report
+
+logger = logging.getLogger(__name__)
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
@@ -696,6 +701,104 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         **cleared_state
     }
 
+
+async def research_verifier(state: AgentState, config: RunnableConfig):
+    """Verify citations in the final report using FACT evaluation methodology.
+    
+    This node implements the Research Verifier that:
+    1. Extracts discrete (statement, URL) citation pairs from the report
+    2. Deduplicates equivalent claims
+    3. Retrieves cited source content via Jina AI Reader API
+    4. Validates each statement against the retrieved content
+    5. Reconstructs the report with only verified citations
+    
+    The verifier preserves the original report structure and wording as closely
+    as possible, removing only claims that are demonstrably unsupported.
+    
+    Args:
+        state: Agent state containing the final report to verify
+        config: Runtime configuration with verification model settings
+        
+    Returns:
+        Dictionary containing verified report and verification statistics
+    """
+    # Step 1: Check if verification is enabled
+    configurable = Configuration.from_runnable_config(config)
+    
+    if not configurable.enable_verification:
+        # Verification disabled - pass through original report
+        logger.info("Citation verification disabled, passing through original report")
+        return {
+            "verified_report": state.get("final_report", ""),
+            "verification_enabled": False,
+            "total_citations": 0,
+            "verified_citations": 0,
+            "removed_citations": 0,
+            "verification_rate": 1.0,
+            "citation_details": []
+        }
+    
+    # Step 2: Get the final report to verify
+    final_report = state.get("final_report", "")
+    
+    if not final_report or final_report.startswith("Error"):
+        # No valid report to verify
+        logger.warning("No valid report to verify")
+        return {
+            "verified_report": final_report,
+            "verification_enabled": True,
+            "total_citations": 0,
+            "verified_citations": 0,
+            "removed_citations": 0,
+            "verification_rate": 1.0,
+            "citation_details": []
+        }
+    
+    logger.info("Starting citation verification process...")
+    
+    # Step 3: Execute the verification pipeline
+    try:
+        verification_result = await verify_report(
+            report_text=final_report,
+            config=config,
+            max_content_length=configurable.verification_max_content_length
+        )
+        
+        logger.info(
+            f"Verification complete: {verification_result.verified_citations}/"
+            f"{verification_result.total_citations} citations verified "
+            f"({verification_result.verification_rate:.1%})"
+        )
+        
+        # Step 4: Update the final report with verified content
+        # The verified report replaces the original final report
+        return {
+            "final_report": verification_result.verified_report,
+            "verified_report": verification_result.verified_report,
+            "verification_enabled": True,
+            "total_citations": verification_result.total_citations,
+            "verified_citations": verification_result.verified_citations,
+            "removed_citations": verification_result.removed_citations,
+            "verification_rate": verification_result.verification_rate,
+            "citation_details": verification_result.citation_details,
+            "messages": [AIMessage(content=verification_result.verified_report)]
+        }
+        
+    except Exception as e:
+        # Verification failed - log error and return original report
+        logger.error(f"Citation verification failed: {str(e)}")
+        return {
+            "verified_report": final_report,
+            "verification_enabled": True,
+            "total_citations": 0,
+            "verified_citations": 0,
+            "removed_citations": 0,
+            "verification_rate": 1.0,
+            "citation_details": [],
+            "messages": [AIMessage(content=f"Verification failed: {str(e)}. Returning original report.\n\n{final_report}")]
+        }
+
+
 # Main Deep Researcher Graph Construction
 # Creates the complete deep research workflow from user input to final report
 deep_researcher_builder = StateGraph(
@@ -709,11 +812,13 @@ deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)        
 deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Research planning phase
 deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research execution phase
 deep_researcher_builder.add_node("final_report_generation", final_report_generation)  # Report generation phase
+deep_researcher_builder.add_node("research_verifier", research_verifier)           # Citation verification phase
 
 # Define main workflow edges for sequential execution
 deep_researcher_builder.add_edge(START, "clarify_with_user")                       # Entry point
 deep_researcher_builder.add_edge("research_supervisor", "final_report_generation") # Research to report
-deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
+deep_researcher_builder.add_edge("final_report_generation", "research_verifier")   # Report to verification
+deep_researcher_builder.add_edge("research_verifier", END)                         # Final exit point
 
 # Compile the complete deep researcher workflow
 deep_researcher = deep_researcher_builder.compile()
